@@ -1,0 +1,16 @@
+{
+  "orderID": "0x1234567890abcdef",
+  "status": "LIVE",
+  "asset_id": "86076435751570733286369126634541849471627178793773765844822295389135259614946",
+  "price": "0.0100",
+  "original_size": "1.00",
+  "size_matched": "0.00",
+  "side": "BUY",
+  "created_at": "2024-12-24T16:00:00Z",
+  "updated_at": "2024-12-24T16:00:00Z",
+  "type": "GTC",
+  "market": "984486",
+  "outcome": "YES",
+  "owner": "0xYourAddress",
+  "maker_address": "0xYourAddress"
+}

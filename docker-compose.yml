@@ -1,0 +1,88 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: polymarket-arb-postgres
+    environment:
+      POSTGRES_USER: polymarket
+      POSTGRES_PASSWORD: polymarket123
+      POSTGRES_DB: polymarket_arb
+    ports:
+      - "5432:5432"
+    volumes:
+      # ✅ PERSISTENT VOLUME: Data survives container restarts
+      - postgres_data:/var/lib/postgresql/data
+      # Mount migrations for manual execution
+      - ./migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U polymarket"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - polymarket-network
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: polymarket-arb-bot
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Application
+      LOG_LEVEL: info
+      HTTP_PORT: 8080
+
+      # Polymarket API
+      POLYMARKET_WS_URL: wss://ws-subscriptions-clob.polymarket.com/ws/market
+      POLYMARKET_GAMMA_API_URL: https://gamma-api.polymarket.com
+
+      # PostgreSQL
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: polymarket
+      POSTGRES_PASSWORD: polymarket123
+      POSTGRES_DB: polymarket_arb
+      POSTGRES_SSLMODE: disable
+
+      # Storage mode: "postgres" or "console"
+      STORAGE_MODE: postgres
+
+      # Market Discovery
+      DISCOVERY_POLL_INTERVAL: 30s
+      DISCOVERY_MARKET_LIMIT: 50
+
+      # WebSocket
+      WS_DIAL_TIMEOUT: 10s
+      WS_PONG_TIMEOUT: 15s
+      WS_PING_INTERVAL: 10s
+      WS_RECONNECT_INITIAL_DELAY: 1s
+      WS_RECONNECT_MAX_DELAY: 30s
+      WS_MESSAGE_BUFFER_SIZE: 1000
+
+      # Arbitrage Detection
+      ARB_THRESHOLD: 0.995
+      ARB_MIN_TRADE_SIZE: 10.0
+      ARB_DETECTION_INTERVAL: 100ms
+      ARB_TAKER_FEE: 0.0100  # 1% taker fee
+
+      # Execution
+      EXECUTION_MODE: paper
+      EXECUTION_MAX_POSITION_SIZE: 1000.0
+    ports:
+      - "8080:8080"
+    networks:
+      - polymarket-network
+    restart: unless-stopped
+
+# ✅ NAMED VOLUME: Ensures data persistence across container restarts
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  polymarket-network:
+    driver: bridge

@@ -1,0 +1,31 @@
+# Environment variables (secrets)
+.env
+.env.*
+!.env.example
+
+# Binary output
+polymarket-arb
+/bin/
+/dist/
+
+# Logs
+*.log
+logs/
+
+# Go test coverage
+*.out
+coverage.html
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Temporary files
+tmp/
+temp/
