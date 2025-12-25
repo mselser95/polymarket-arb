@@ -18,6 +18,10 @@ type Market struct {
 	Description string    `json:"description"`
 	Outcomes    string    `json:"outcomes"`       // JSON string: "[\"Yes\", \"No\"]"
 	ClobTokens  string    `json:"clobTokenIds"`   // JSON string: "[\"token1\", \"token2\"]"
+
+	// Trading constraints (fetched separately from CLOB API)
+	MinOrderSize float64 `json:"min_order_size"` // Minimum order size in tokens
+	TickSize     float64 `json:"tick_size"`      // Price tick size
 }
 
 // UnmarshalJSON custom unmarshaler to parse outcomes and clobTokenIds into Tokens.
@@ -58,9 +62,11 @@ func (m *Market) UnmarshalJSON(data []byte) error {
 
 // Token represents a market outcome token (YES or NO).
 type Token struct {
-	TokenID string  `json:"token_id"`
-	Outcome string  `json:"outcome"`
-	Price   float64 `json:"price,omitempty"`
+	TokenID      string  `json:"token_id"`
+	Outcome      string  `json:"outcome"`
+	Price        float64 `json:"price,omitempty"`
+	MinOrderSize float64 `json:"min_order_size,omitempty"` // Minimum order size for this token
+	TickSize     float64 `json:"tick_size,omitempty"`      // Tick size for this token
 }
 
 // GetTokenByOutcome returns the token for a specific outcome (YES or NO).

@@ -10,6 +10,7 @@ import (
 	"github.com/mselser95/polymarket-arb/internal/arbitrage"
 	"github.com/mselser95/polymarket-arb/internal/discovery"
 	"github.com/mselser95/polymarket-arb/internal/execution"
+	"github.com/mselser95/polymarket-arb/internal/markets"
 	"github.com/mselser95/polymarket-arb/internal/orderbook"
 	"github.com/mselser95/polymarket-arb/internal/testutil"
 	"github.com/mselser95/polymarket-arb/pkg/cache"
@@ -72,13 +73,17 @@ func TestE2E_ArbitrageFlow(t *testing.T) {
 	// Setup mock storage
 	storage := testutil.NewMockStorage()
 
+	// Setup metadata client
+	metadataClient := markets.NewMetadataClient()
+	cachedMetadataClient := markets.NewCachedMetadataClient(metadataClient, nil)
+
 	// Setup arbitrage detector
 	detector := arbitrage.New(arbitrage.Config{
 		Threshold:    0.995,
 		MinTradeSize: 10.0,
 		TakerFee:     0.01,
 		Logger:       logger,
-	}, obMgr, discoverySvc, storage)
+	}, obMgr, discoverySvc, storage, cachedMetadataClient)
 
 	// Setup executor
 	executor := execution.New(&execution.Config{

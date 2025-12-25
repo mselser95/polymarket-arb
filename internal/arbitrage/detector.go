@@ -2,10 +2,12 @@ package arbitrage
 
 import (
 	"context"
+	"math"
 	"sync"
 	"time"
 
 	"github.com/mselser95/polymarket-arb/internal/discovery"
+	"github.com/mselser95/polymarket-arb/internal/markets"
 	"github.com/mselser95/polymarket-arb/internal/orderbook"
 	"github.com/mselser95/polymarket-arb/pkg/types"
 	"go.uber.org/zap"
@@ -24,6 +26,7 @@ type Detector struct {
 	config           Config
 	logger           *zap.Logger
 	storage          Storage
+	metadataClient   *markets.CachedMetadataClient
 	opportunityChan  chan *Opportunity
 	obUpdateChan     <-chan *types.OrderbookSnapshot
 	ctx              context.Context
@@ -39,13 +42,14 @@ type Config struct {
 }
 
 // New creates a new arbitrage detector.
-func New(cfg Config, obManager *orderbook.Manager, discoveryService *discovery.Service, storage Storage) *Detector {
+func New(cfg Config, obManager *orderbook.Manager, discoveryService *discovery.Service, storage Storage, metadataClient *markets.CachedMetadataClient) *Detector {
 	return &Detector{
 		obManager:        obManager,
 		discoveryService: discoveryService,
 		config:           cfg,
 		logger:           cfg.Logger,
 		storage:          storage,
+		metadataClient:   metadataClient,
 		opportunityChan:  make(chan *Opportunity, 50),
 		obUpdateChan:     obManager.UpdateChan(),
 	}
@@ -229,6 +233,64 @@ func (d *Detector) detect(
 		return nil, false
 	}
 
+	// Fetch market-specific metadata (tick size and minimum order size)
+	var yesTickSize, yesMinSize, noTickSize, noMinSize float64
+
+	// Use metadata client if available, otherwise use defaults
+	if d.metadataClient != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		var err error
+		yesTickSize, yesMinSize, err = d.metadataClient.GetTokenMetadata(ctx, market.TokenIDYes)
+		if err != nil {
+			d.logger.Warn("failed-to-fetch-yes-metadata",
+				zap.String("token-id", market.TokenIDYes),
+				zap.Error(err))
+			// Use defaults
+			yesTickSize = 0.01
+			yesMinSize = 5.0
+		}
+
+		noTickSize, noMinSize, err = d.metadataClient.GetTokenMetadata(ctx, market.TokenIDNo)
+		if err != nil {
+			d.logger.Warn("failed-to-fetch-no-metadata",
+				zap.String("token-id", market.TokenIDNo),
+				zap.Error(err))
+			// Use defaults
+			noTickSize = 0.01
+			noMinSize = 5.0
+		}
+	} else {
+		// No metadata client available, use defaults
+		yesTickSize = 0.01
+		yesMinSize = 5.0
+		noTickSize = 0.01
+		noMinSize = 5.0
+	}
+
+	// Calculate token sizes for both sides
+	yesTokenSize := maxSize / yesBook.BestAskPrice
+	noTokenSize := maxSize / noBook.BestAskPrice
+
+	// Check if BOTH sides meet minimum requirements
+	if yesTokenSize < yesMinSize || noTokenSize < noMinSize {
+		d.logger.Debug("opportunity-below-market-minimum",
+			zap.String("market-slug", market.MarketSlug),
+			zap.Float64("yes-token-size", yesTokenSize),
+			zap.Float64("yes-min-size", yesMinSize),
+			zap.Float64("no-token-size", noTokenSize),
+			zap.Float64("no-min-size", noMinSize))
+		return nil, false
+	}
+
+	// Use the LARGER minimum to ensure both orders pass
+	requiredUSD := math.Max(yesMinSize*yesBook.BestAskPrice, noMinSize*noBook.BestAskPrice)
+	if maxSize < requiredUSD {
+		// Adjust maxSize upward to meet both minimums
+		maxSize = requiredUSD
+	}
+
 	// Create opportunity using ASK prices (what we pay to buy)
 	opp := NewOpportunity(
 		market.MarketID,
@@ -243,6 +305,12 @@ func (d *Detector) detect(
 		d.config.Threshold,
 		d.config.TakerFee,
 	)
+
+	// Store metadata in opportunity for executor to use
+	opp.YesTickSize = yesTickSize
+	opp.YesMinSize = yesMinSize
+	opp.NoTickSize = noTickSize
+	opp.NoMinSize = noMinSize
 
 	// Update metrics
 	OpportunitiesDetectedTotal.Inc()

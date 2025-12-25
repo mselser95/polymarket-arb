@@ -29,6 +29,12 @@ type Opportunity struct {
 	NetProfit       float64
 	NetProfitBPS    int
 	ConfigThreshold float64
+
+	// Market metadata (fetched from CLOB API)
+	YesTickSize float64 // Tick size for YES token
+	YesMinSize  float64 // Minimum order size for YES token (in tokens)
+	NoTickSize  float64 // Tick size for NO token
+	NoMinSize   float64 // Minimum order size for NO token (in tokens)
 }
 
 // NewOpportunity creates a new arbitrage opportunity with fee accounting.

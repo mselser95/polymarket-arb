@@ -7,6 +7,7 @@ import (
 	"github.com/mselser95/polymarket-arb/internal/arbitrage"
 	"github.com/mselser95/polymarket-arb/internal/discovery"
 	"github.com/mselser95/polymarket-arb/internal/execution"
+	"github.com/mselser95/polymarket-arb/internal/markets"
 	"github.com/mselser95/polymarket-arb/internal/orderbook"
 	"github.com/mselser95/polymarket-arb/internal/storage"
 	"github.com/mselser95/polymarket-arb/pkg/cache"
@@ -48,7 +49,7 @@ func New(cfg *config.Config, logger *zap.Logger, opts *Options) (*App, error) {
 	}
 
 	// Setup arbitrage detector
-	arbDetector := setupArbitrageDetector(cfg, logger, obManager, discoveryService, arbStorage)
+	arbDetector := setupArbitrageDetector(cfg, logger, obManager, discoveryService, arbStorage, marketCache)
 
 	// Setup executor
 	executor := setupExecutor(cfg, logger, arbDetector)
@@ -149,7 +150,12 @@ func setupArbitrageDetector(
 	obManager *orderbook.Manager,
 	discoveryService *discovery.Service,
 	arbStorage arbitrage.Storage,
+	appCache cache.Cache,
 ) *arbitrage.Detector {
+	// Create metadata client for fetching tick size and min order size
+	metadataClient := markets.NewMetadataClient()
+	cachedMetadataClient := markets.NewCachedMetadataClient(metadataClient, appCache)
+
 	return arbitrage.New(
 		arbitrage.Config{
 			Threshold:    cfg.ArbThreshold,
@@ -160,6 +166,7 @@ func setupArbitrageDetector(
 		obManager,
 		discoveryService,
 		arbStorage,
+		cachedMetadataClient,
 	)
 }
 

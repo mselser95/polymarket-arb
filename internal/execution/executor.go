@@ -212,6 +212,10 @@ func (e *Executor) executeLive(opp *arbitrage.Opportunity) *types.ExecutionResul
 		opp.MaxTradeSize,
 		opp.YesAskPrice,
 		opp.NoAskPrice,
+		opp.YesTickSize,
+		opp.YesMinSize,
+		opp.NoTickSize,
+		opp.NoMinSize,
 	)
 
 	if err != nil {

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"math/big"
 	"net/http"
 	"strings"
@@ -97,14 +98,26 @@ type SignedOrderJSON struct {
 
 // OrderResponse represents the API response for an order
 type OrderResponse struct {
-	OrderID string  `json:"orderID"`
-	Status  string  `json:"status"`
-	Price   float64 `json:"price,string"`
-	Size    float64 `json:"size,string"`
+	OrderID      string  `json:"orderID"`
+	Status       string  `json:"status"`
+	TokenID      string  `json:"asset_id"`
+	Price        float64 `json:"price,string"`
+	Size         float64 `json:"original_size,string"`
+	SizeFilled   float64 `json:"size_matched,string"`
+	Side         string  `json:"side"`
+	CreatedAt    string  `json:"created_at"`
+	UpdatedAt    string  `json:"updated_at"`
+	OrderType    string  `json:"type"`
+	MarketID     string  `json:"market"`
+	Outcome      string  `json:"outcome"`
+	Owner        string  `json:"owner"`
+	MakerAddress string  `json:"maker_address"`
+	Message      string  `json:"message,omitempty"`
+	Error        string  `json:"error,omitempty"`
 }
 
 // PlaceOrders places YES and NO orders for arbitrage
-func (c *OrderClient) PlaceOrders(ctx context.Context, yesTokenID, noTokenID string, size, yesPrice, noPrice float64) (*OrderResponse, *OrderResponse, error) {
+func (c *OrderClient) PlaceOrders(ctx context.Context, yesTokenID, noTokenID string, size, yesPrice, noPrice, yesTickSize, yesMinSize, noTickSize, noMinSize float64) (*OrderResponse, *OrderResponse, error) {
 	// Determine maker address
 	makerAddress := c.address
 	signerAddress := c.address
@@ -112,9 +125,26 @@ func (c *OrderClient) PlaceOrders(ctx context.Context, yesTokenID, noTokenID str
 		makerAddress = c.proxyAddress
 	}
 
-	// Build YES order
-	yesMakerAmount := usdToRawAmount(size)
-	yesTakerAmount := usdToRawAmount(size / yesPrice)
+	// Get rounding precision for each token
+	yesSizePrecision, yesAmountPrecision := getRoundingConfig(yesTickSize)
+	noSizePrecision, noAmountPrecision := getRoundingConfig(noTickSize)
+
+	// Calculate token sizes with rounding
+	yesTakerTokens := roundAmount(size/yesPrice, yesSizePrecision)
+	noTakerTokens := roundAmount(size/noPrice, noSizePrecision)
+
+	// Validate against minimums
+	if yesTakerTokens < yesMinSize {
+		return nil, nil, fmt.Errorf("YES order size %.2f below minimum %.2f tokens", yesTakerTokens, yesMinSize)
+	}
+	if noTakerTokens < noMinSize {
+		return nil, nil, fmt.Errorf("NO order size %.2f below minimum %.2f tokens", noTakerTokens, noMinSize)
+	}
+
+	// Build YES order with rounded amounts
+	yesMakerUSD := roundAmount(yesTakerTokens*yesPrice, yesAmountPrecision)
+	yesMakerAmount := usdToRawAmount(yesMakerUSD)
+	yesTakerAmount := usdToRawAmount(yesTakerTokens)
 
 	yesOrderData := &model.OrderData{
 		Maker:         makerAddress,
@@ -135,9 +165,10 @@ func (c *OrderClient) PlaceOrders(ctx context.Context, yesTokenID, noTokenID str
 		return nil, nil, fmt.Errorf("build YES order: %w", err)
 	}
 
-	// Build NO order
-	noMakerAmount := usdToRawAmount(size)
-	noTakerAmount := usdToRawAmount(size / noPrice)
+	// Build NO order with rounded amounts
+	noMakerUSD := roundAmount(noTakerTokens*noPrice, noAmountPrecision)
+	noMakerAmount := usdToRawAmount(noMakerUSD)
+	noTakerAmount := usdToRawAmount(noTakerTokens)
 
 	noOrderData := &model.OrderData{
 		Maker:         makerAddress,
@@ -274,4 +305,27 @@ func (c *OrderClient) submitOrder(ctx context.Context, order *model.SignedOrder)
 func usdToRawAmount(usd float64) string {
 	rawAmount := int64(usd * 1000000)
 	return fmt.Sprintf("%d", rawAmount)
+}
+
+// getRoundingConfig returns the precision for size and amount based on tick size
+// Matches Python client's ROUNDING_CONFIG
+func getRoundingConfig(tickSize float64) (sizePrecision int, amountPrecision int) {
+	switch tickSize {
+	case 0.1:
+		return 2, 3 // size=2, amount=3
+	case 0.01:
+		return 2, 4 // size=2, amount=4
+	case 0.001:
+		return 2, 5 // size=2, amount=5
+	case 0.0001:
+		return 2, 6 // size=2, amount=6
+	default:
+		return 2, 4 // Default to 0.01 tick size
+	}
+}
+
+// roundAmount rounds an amount to the specified number of decimal places
+func roundAmount(value float64, decimals int) float64 {
+	multiplier := math.Pow(10, float64(decimals))
+	return math.Round(value*multiplier) / multiplier
 }

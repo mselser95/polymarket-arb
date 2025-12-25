@@ -19,6 +19,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/joho/godotenv"
 	"github.com/mselser95/polymarket-arb/internal/discovery"
+	"github.com/mselser95/polymarket-arb/internal/markets"
 	"github.com/polymarket/go-order-utils/pkg/builder"
 	"github.com/polymarket/go-order-utils/pkg/model"
 	"github.com/spf13/cobra"
@@ -96,23 +97,26 @@ func runPlaceOrders(cmd *cobra.Command, args []string) error {
 	fmt.Printf("YES Token: %s\n", yesToken.TokenID)
 	fmt.Printf("NO Token: %s\n\n", noToken.TokenID)
 
-	// Fetch tick size for this market
-	// Default to 0.01 if fetching fails (common for most markets)
-	tickSize := 0.01
-	fmt.Printf("Fetching tick size...\n")
-	tickSizeURL := fmt.Sprintf("https://clob.polymarket.com/tick-size?token_id=%s", yesToken.TokenID)
-	tickResp, err := http.Get(tickSizeURL)
-	if err == nil {
-		defer tickResp.Body.Close()
-		var tickData struct {
-			MinimumTickSize float64 `json:"minimum_tick_size"`
-		}
-		if err := json.NewDecoder(tickResp.Body).Decode(&tickData); err == nil && tickData.MinimumTickSize > 0 {
-			tickSize = tickData.MinimumTickSize
-		}
+	// Create metadata client and fetch tick size + min order size
+	fmt.Printf("Fetching market metadata...\n")
+	metadataClient := markets.NewMetadataClient()
+	cachedMetadataClient := markets.NewCachedMetadataClient(metadataClient, nil) // No cache for CLI
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	yesTickSize, yesMinSize, err := cachedMetadataClient.GetTokenMetadata(ctx, yesToken.TokenID)
+	if err != nil {
+		return fmt.Errorf("fetch YES token metadata: %w", err)
 	}
 
-	fmt.Printf("Tick Size: %.4f\n\n", tickSize)
+	noTickSize, noMinSize, err := cachedMetadataClient.GetTokenMetadata(ctx, noToken.TokenID)
+	if err != nil {
+		return fmt.Errorf("fetch NO token metadata: %w", err)
+	}
+
+	fmt.Printf("YES Token - Tick Size: %.4f, Min Order Size: %.2f tokens\n", yesTickSize, yesMinSize)
+	fmt.Printf("NO Token - Tick Size: %.4f, Min Order Size: %.2f tokens\n\n", noTickSize, noMinSize)
 
 	// Build and sign orders
 	chainID := big.NewInt(137) // Polygon mainnet
@@ -127,19 +131,32 @@ func runPlaceOrders(cmd *cobra.Command, args []string) error {
 	// Convert prices to maker/taker amounts with tick-size-based rounding
 	// For BUY orders: taker = tokens to receive, maker = USDC to spend
 	// Python client applies market-specific rounding based on tick size
-	sizePrecision, amountPrecision := getRoundingConfig(tickSize)
+	yesSizePrecision, yesAmountPrecision := getRoundingConfig(yesTickSize)
+	noSizePrecision, noAmountPrecision := getRoundingConfig(noTickSize)
 
 	// YES order: calculate taker amount (tokens) first, then maker amount (USDC)
-	yesTakerTokens := roundAmount(orderSize/yesPrice, sizePrecision)      // tokens: size precision (2 decimals)
-	yesMakerUSD := roundAmount(yesTakerTokens*yesPrice, amountPrecision)  // USDC: amount precision (5 decimals)
+	yesTakerTokens := roundAmount(orderSize/yesPrice, yesSizePrecision)              // tokens: size precision (2 decimals)
+	yesMakerUSD := roundAmount(yesTakerTokens*yesPrice, yesAmountPrecision)          // USDC: amount precision (5 decimals)
 	yesMakerAmount := usdToRawAmount(yesMakerUSD)
 	yesTakerAmount := usdToRawAmount(yesTakerTokens)
 
+	// Validate YES order size against minimum
+	if yesTakerTokens < yesMinSize {
+		return fmt.Errorf("YES order size %.2f tokens below minimum %.2f tokens (need $%.2f USDC at price %.4f)",
+			yesTakerTokens, yesMinSize, yesMinSize*yesPrice, yesPrice)
+	}
+
 	// NO order: calculate taker amount (tokens) first, then maker amount (USDC)
-	noTakerTokens := roundAmount(orderSize/noPrice, sizePrecision)      // tokens: size precision (2 decimals)
-	noMakerUSD := roundAmount(noTakerTokens*noPrice, amountPrecision)  // USDC: amount precision (5 decimals)
+	noTakerTokens := roundAmount(orderSize/noPrice, noSizePrecision)              // tokens: size precision (2 decimals)
+	noMakerUSD := roundAmount(noTakerTokens*noPrice, noAmountPrecision)          // USDC: amount precision (5 decimals)
 	noMakerAmount := usdToRawAmount(noMakerUSD)
 	noTakerAmount := usdToRawAmount(noTakerTokens)
+
+	// Validate NO order size against minimum
+	if noTakerTokens < noMinSize {
+		return fmt.Errorf("NO order size %.2f tokens below minimum %.2f tokens (need $%.2f USDC at price %.4f)",
+			noTakerTokens, noMinSize, noMinSize*noPrice, noPrice)
+	}
 
 	// For signatureType=0 (EOA), maker and signer should be the same
 	// For signatureType=1/2 (Proxy/Gnosis), maker can be different
@@ -234,10 +251,10 @@ func runPlaceOrders(cmd *cobra.Command, args []string) error {
 	// Submit orders individually
 	fmt.Printf("=== Submitting YES Order ===\n\n")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	ctx3, cancel3 := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel3()
 
-	yesResp, err := submitSingleOrder(ctx, cfg, yesSignedOrder)
+	yesResp, err := submitSingleOrder(ctx3, cfg, yesSignedOrder)
 	if err != nil {
 		fmt.Printf("❌ YES order failed: %v\n\n", err)
 	} else {
@@ -245,12 +262,12 @@ func runPlaceOrders(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Order ID: %s\n", yesResp.OrderID)
 		fmt.Printf("  Status: %s\n", yesResp.Status)
 		fmt.Printf("  Price: %.4f\n", yesResp.Price)
-		fmt.Printf("  Size: %.2f\n\n", yesResp.Size)
+		fmt.Printf("  Size: %.2f (Filled: %.2f)\n\n", yesResp.Size, yesResp.SizeFilled)
 	}
 
 	fmt.Printf("=== Submitting NO Order ===\n\n")
 
-	noResp, err := submitSingleOrder(ctx, cfg, noSignedOrder)
+	noResp, err := submitSingleOrder(ctx3, cfg, noSignedOrder)
 	if err != nil {
 		fmt.Printf("❌ NO order failed: %v\n\n", err)
 	} else {
@@ -258,7 +275,7 @@ func runPlaceOrders(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Order ID: %s\n", noResp.OrderID)
 		fmt.Printf("  Status: %s\n", noResp.Status)
 		fmt.Printf("  Price: %.4f\n", noResp.Price)
-		fmt.Printf("  Size: %.2f\n\n", noResp.Size)
+		fmt.Printf("  Size: %.2f (Filled: %.2f)\n\n", noResp.Size, noResp.SizeFilled)
 	}
 
 	return nil
@@ -375,10 +392,22 @@ type SignedOrderJSON struct {
 }
 
 type OrderResponseItem struct {
-	OrderID string  `json:"orderID"`
-	Status  string  `json:"status"`
-	Price   float64 `json:"price,string"`
-	Size    float64 `json:"size,string"`
+	OrderID      string  `json:"orderID"`
+	Status       string  `json:"status"`
+	TokenID      string  `json:"asset_id"`
+	Price        float64 `json:"price,string"`
+	Size         float64 `json:"original_size,string"`
+	SizeFilled   float64 `json:"size_matched,string"`
+	Side         string  `json:"side"`
+	CreatedAt    string  `json:"created_at"`
+	UpdatedAt    string  `json:"updated_at"`
+	OrderType    string  `json:"type"`
+	MarketID     string  `json:"market"`
+	Outcome      string  `json:"outcome"`
+	Owner        string  `json:"owner"`
+	MakerAddress string  `json:"maker_address"`
+	Message      string  `json:"message,omitempty"`
+	Error        string  `json:"error,omitempty"`
 }
 
 func submitSingleOrder(ctx context.Context, cfg *PlaceOrdersConfig, order *model.SignedOrder) (*OrderResponseItem, error) {
