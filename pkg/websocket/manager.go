@@ -105,6 +105,10 @@ func (m *Manager) connect(ctx context.Context) error {
 		return nil
 	})
 
+	// Set read limit to 10MB to handle large messages with many price changes
+	// Default is 512KB which can cause truncation with high-volume markets
+	conn.SetReadLimit(10 * 1024 * 1024)
+
 	m.mu.Lock()
 	m.conn = conn
 	m.mu.Unlock()
