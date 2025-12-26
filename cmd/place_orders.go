@@ -48,7 +48,7 @@ func init() {
 
 	placeOrdersCmd.Flags().Float64VarP(&yesPrice, "yes-price", "y", 0.01, "YES order price")
 	placeOrdersCmd.Flags().Float64VarP(&noPrice, "no-price", "n", 0.01, "NO order price")
-	placeOrdersCmd.Flags().Float64VarP(&orderSize, "size", "s", 1.0, "Order size in USD")
+	placeOrdersCmd.Flags().Float64VarP(&orderSize, "size", "s", 1.1, "Order size in USD per side")
 	placeOrdersCmd.Flags().BoolVarP(&dryRun, "dry-run", "d", false, "Build orders but don't submit")
 }
 

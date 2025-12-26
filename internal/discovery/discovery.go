@@ -96,8 +96,8 @@ func (s *Service) poll(ctx context.Context) error {
 		return s.pollSingleMarket(ctx)
 	}
 
-	// Fetch active markets sorted by 24h volume (DESC) - most liquid markets first
-	resp, err := s.client.FetchActiveMarkets(ctx, s.marketLimit, 0, "volume24hr")
+	// Fetch active markets sorted by creation date (DESC) - newest markets first
+	resp, err := s.client.FetchActiveMarkets(ctx, s.marketLimit, 0, "createdAt")
 	if err != nil {
 		PollErrorsTotal.Inc()
 		return fmt.Errorf("fetch active markets: %w", err)

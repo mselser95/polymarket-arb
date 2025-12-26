@@ -50,6 +50,32 @@ type OrderClientConfig struct {
 	Logger        *zap.Logger
 }
 
+// OrderInfo represents an open order from GET /data/orders
+type OrderInfo struct {
+	OrderID      string `json:"id"`             // API uses "id" not "order_id"
+	Market       string `json:"market"`         // Market ID (conditionID)
+	Side         string `json:"side"`           // BUY/SELL
+	Price        string `json:"price"`
+	OriginalSize string `json:"original_size"`
+	Status       string `json:"status"`         // LIVE/RESTING
+	AssetID      string `json:"asset_id"`       // Token ID
+	Outcome      string `json:"outcome"`        // Outcome name (Yes/No/candidate name)
+}
+
+// OpenOrdersResponse represents the wrapper response from GET /data/orders
+type OpenOrdersResponse struct {
+	Data       []OrderInfo `json:"data"`
+	NextCursor string      `json:"next_cursor"`
+	Limit      int         `json:"limit"`
+	Count      int         `json:"count"`
+}
+
+// CancelAllResult represents response from DELETE /cancel-all
+type CancelAllResult struct {
+	Canceled    []string          `json:"canceled"`
+	NotCanceled map[string]string `json:"not_canceled"`
+}
+
 // NewOrderClient creates a new order client
 func NewOrderClient(cfg *OrderClientConfig) (*OrderClient, error) {
 	// Parse private key
@@ -137,6 +163,7 @@ func (c *OrderClient) PlaceSingleOrder(
 // This method is for explicit binary-only usage (2 outcomes: YES and NO tokens).
 // For multi-outcome markets (3+ outcomes), use PlaceOrdersMultiOutcome instead.
 // Both orders are submitted in a single API call for atomic execution.
+// The size parameter specifies the number of tokens to buy for each outcome (not USD amount).
 func (c *OrderClient) PlaceOrdersBatch(
 	ctx context.Context,
 	yesTokenID string,
@@ -149,20 +176,17 @@ func (c *OrderClient) PlaceOrdersBatch(
 	noTickSize float64,
 	noMinSize float64,
 ) (yesResp *types.OrderSubmissionResponse, noResp *types.OrderSubmissionResponse, err error) {
-	// Determine maker address
+	// For EOA: maker and signer must be the same address
 	makerAddress := c.address
 	signerAddress := c.address
-	if c.proxyAddress != "" {
-		makerAddress = c.proxyAddress
-	}
 
 	// Get rounding precision for each token
 	yesSizePrecision, yesAmountPrecision := getRoundingConfig(yesTickSize)
 	noSizePrecision, noAmountPrecision := getRoundingConfig(noTickSize)
 
-	// Calculate token sizes with rounding
-	yesTakerTokens := roundAmount(size/yesPrice, yesSizePrecision)
-	noTakerTokens := roundAmount(size/noPrice, noSizePrecision)
+	// size parameter is already in tokens (matches Python client behavior)
+	yesTakerTokens := roundAmount(size, yesSizePrecision)
+	noTakerTokens := roundAmount(size, noSizePrecision)
 
 	// Validate against minimums
 	if yesTakerTokens < yesMinSize {
@@ -229,6 +253,22 @@ func (c *OrderClient) PlaceOrdersBatch(
 		zap.String("signer", signerAddress),
 		zap.Float64("size", size))
 
+	// DEBUG: Print YES order structure for comparison
+	c.logger.Info("GO-YES-ORDER-STRUCTURE",
+		zap.Int64("salt", yesSignedOrder.Salt.Int64()),
+		zap.String("maker", yesSignedOrder.Maker.Hex()),
+		zap.String("signer", yesSignedOrder.Signer.Hex()),
+		zap.String("taker", yesSignedOrder.Taker.Hex()),
+		zap.String("tokenId", yesSignedOrder.TokenId.String()),
+		zap.String("makerAmount", yesSignedOrder.MakerAmount.String()),
+		zap.String("takerAmount", yesSignedOrder.TakerAmount.String()),
+		zap.Int64("side", yesSignedOrder.Side.Int64()),
+		zap.String("feeRateBps", yesSignedOrder.FeeRateBps.String()),
+		zap.String("nonce", yesSignedOrder.Nonce.String()),
+		zap.String("expiration", yesSignedOrder.Expiration.String()),
+		zap.Int64("signatureType", yesSignedOrder.SignatureType.Int64()),
+		zap.String("signature", fmt.Sprintf("0x%x", yesSignedOrder.Signature)))
+
 	// Convert signed orders to JSON format
 	yesOrderJSON := c.convertToOrderJSON(yesSignedOrder)
 	noOrderJSON := c.convertToOrderJSON(noSignedOrder)
@@ -288,6 +328,7 @@ type OutcomeOrderParams struct {
 // PlaceOrdersMultiOutcome places orders for N outcomes atomically using the batch endpoint.
 // This method supports binary (2 outcomes) and multi-outcome (3+) markets.
 // All orders are submitted in a single API call for atomic execution.
+// The size parameter specifies the number of tokens to buy for each outcome (not USD amount).
 func (c *OrderClient) PlaceOrdersMultiOutcome(
 	ctx context.Context,
 	outcomes []OutcomeOrderParams,
@@ -297,12 +338,9 @@ func (c *OrderClient) PlaceOrdersMultiOutcome(
 		return nil, fmt.Errorf("at least 2 outcomes required, got %d", len(outcomes))
 	}
 
-	// Determine maker address
+	// For EOA: maker and signer must be the same address
 	makerAddress := c.address
 	signerAddress := c.address
-	if c.proxyAddress != "" {
-		makerAddress = c.proxyAddress
-	}
 
 	// Build signed orders for each outcome
 	batchReq := make(types.BatchOrderRequest, 0, len(outcomes))
@@ -311,8 +349,8 @@ func (c *OrderClient) PlaceOrdersMultiOutcome(
 		// Get rounding precision
 		sizePrecision, amountPrecision := getRoundingConfig(outcome.TickSize)
 
-		// Calculate token size with rounding
-		takerTokens := roundAmount(size/outcome.Price, sizePrecision)
+		// size parameter is already in tokens (matches Python client behavior)
+		takerTokens := roundAmount(size, sizePrecision)
 
 		// Validate against minimum
 		if takerTokens < outcome.MinSize {
@@ -342,6 +380,24 @@ func (c *OrderClient) PlaceOrdersMultiOutcome(
 		signedOrder, err := c.orderBuilder.BuildSignedOrder(c.privateKey, orderData, model.CTFExchange)
 		if err != nil {
 			return nil, fmt.Errorf("build order %d: %w", i, err)
+		}
+
+		// DEBUG: Print first order (YES) structure for comparison
+		if i == 0 {
+			c.logger.Info("GO-YES-ORDER-STRUCTURE",
+				zap.Int64("salt", signedOrder.Salt.Int64()),
+				zap.String("maker", signedOrder.Maker.Hex()),
+				zap.String("signer", signedOrder.Signer.Hex()),
+				zap.String("taker", signedOrder.Taker.Hex()),
+				zap.String("tokenId", signedOrder.TokenId.String()),
+				zap.String("makerAmount", signedOrder.MakerAmount.String()),
+				zap.String("takerAmount", signedOrder.TakerAmount.String()),
+				zap.Int64("side", signedOrder.Side.Int64()),
+				zap.String("feeRateBps", signedOrder.FeeRateBps.String()),
+				zap.String("nonce", signedOrder.Nonce.String()),
+				zap.String("expiration", signedOrder.Expiration.String()),
+				zap.Int64("signatureType", signedOrder.SignatureType.Int64()),
+				zap.String("signature", fmt.Sprintf("0x%x", signedOrder.Signature)))
 		}
 
 		// Convert to JSON and add to batch
@@ -463,6 +519,11 @@ func (c *OrderClient) submitBatchOrder(
 	httpReq.Header.Set("POLY_PASSPHRASE", c.passphrase)
 	httpReq.Header.Set("POLY_ADDRESS", c.address)
 
+	// Log the request being sent (at DEBUG level)
+	c.logger.Debug("submitting-batch-order-request",
+		zap.String("url", url),
+		zap.String("request-body", string(reqBody)))
+
 	client := &http.Client{Timeout: 30 * time.Second}
 	httpResp, err := client.Do(httpReq)
 	if err != nil {
@@ -477,14 +538,123 @@ func (c *OrderClient) submitBatchOrder(
 		return resp, err
 	}
 
+	// Log the raw response (at DEBUG level for now, will be useful for troubleshooting)
+	c.logger.Debug("batch-order-api-response",
+		zap.Int("status-code", httpResp.StatusCode),
+		zap.String("response-body", string(body)))
+
 	if httpResp.StatusCode != http.StatusOK && httpResp.StatusCode != http.StatusCreated {
+		// Log error responses at ERROR level
+		c.logger.Error("batch-order-api-error",
+			zap.Int("status-code", httpResp.StatusCode),
+			zap.String("response-body", string(body)))
 		err = fmt.Errorf("API error (status %d): %s", httpResp.StatusCode, string(body))
 		return resp, err
 	}
 
 	err = json.Unmarshal(body, &resp)
 	if err != nil {
+		c.logger.Error("failed-to-parse-batch-response",
+			zap.Error(err),
+			zap.String("response-body", string(body)))
 		err = fmt.Errorf("parse batch response: %w\nBody: %s", err, string(body))
+		return resp, err
+	}
+
+	// Log the parsed response structure (resp is already a slice)
+	c.logger.Info("batch-order-submitted",
+		zap.Int("order-count", len(resp)),
+		zap.Bool("has-orders", len(resp) > 0))
+
+	// Log each order result
+	for i, order := range resp {
+		c.logger.Info("batch-order-result",
+			zap.Int("order-index", i),
+			zap.String("order-id", order.OrderID),
+			zap.String("status", order.Status),
+			zap.Bool("success", order.Success),
+			zap.String("error", order.ErrorMsg))
+	}
+
+	return resp, nil
+}
+
+// GetOrder queries the status of a specific order by ID.
+func (c *OrderClient) GetOrder(
+	ctx context.Context,
+	orderID string,
+) (resp *types.OrderQueryResponse, err error) {
+	// Create HMAC signature for GET request
+	timestamp := fmt.Sprintf("%d", time.Now().Unix())
+	method := "GET"
+	requestPath := "/order/" + orderID
+
+	signaturePayload := timestamp + method + requestPath // Empty body for GET
+
+	// Decode secret using URL-safe base64
+	secretBytes, err := base64.URLEncoding.DecodeString(c.secret)
+	if err != nil {
+		err = fmt.Errorf("decode secret: %w", err)
+		return resp, err
+	}
+
+	h := hmac.New(sha256.New, secretBytes)
+	h.Write([]byte(signaturePayload))
+	signature := base64.URLEncoding.EncodeToString(h.Sum(nil))
+
+	// Make request
+	url := "https://clob.polymarket.com" + requestPath
+	httpReq, err := http.NewRequestWithContext(ctx, method, url, nil)
+	if err != nil {
+		err = fmt.Errorf("create request: %w", err)
+		return resp, err
+	}
+
+	// Set headers (same as POST requests)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("POLY_API_KEY", c.apiKey)
+	httpReq.Header.Set("POLY_SIGNATURE", signature)
+	httpReq.Header.Set("POLY_TIMESTAMP", timestamp)
+	httpReq.Header.Set("POLY_PASSPHRASE", c.passphrase)
+	httpReq.Header.Set("POLY_ADDRESS", c.address)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	httpResp, err := client.Do(httpReq)
+	if err != nil {
+		err = fmt.Errorf("send request: %w", err)
+		return resp, err
+	}
+	defer httpResp.Body.Close()
+
+	body, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		err = fmt.Errorf("read response: %w", err)
+		return resp, err
+	}
+
+	// Log response for debugging
+	c.logger.Debug("get-order-api-response",
+		zap.String("order-id", orderID),
+		zap.Int("status-code", httpResp.StatusCode),
+		zap.String("response-body", string(body)))
+
+	if httpResp.StatusCode != http.StatusOK {
+		// Log error responses at ERROR level
+		c.logger.Error("get-order-api-error",
+			zap.String("order-id", orderID),
+			zap.Int("status-code", httpResp.StatusCode),
+			zap.String("response-body", string(body)))
+		err = fmt.Errorf("API error (status %d): %s", httpResp.StatusCode, string(body))
+		return resp, err
+	}
+
+	err = json.Unmarshal(body, &resp)
+	if err != nil {
+		c.logger.Error("failed-to-parse-order-response",
+			zap.String("order-id", orderID),
+			zap.Error(err),
+			zap.String("response-body", string(body)))
+		err = fmt.Errorf("parse order response: %w\nBody: %s", err, string(body))
 		return resp, err
 	}
 
@@ -601,4 +771,169 @@ func getRoundingConfig(tickSize float64) (sizePrecision int, amountPrecision int
 func roundAmount(value float64, decimals int) float64 {
 	multiplier := math.Pow(10, float64(decimals))
 	return math.Round(value*multiplier) / multiplier
+}
+
+// GetOpenOrders fetches all open orders for the authenticated user
+func (c *OrderClient) GetOpenOrders(ctx context.Context) (orders []OrderInfo, err error) {
+	method := "GET"
+	requestPath := "/data/orders"
+	body := ""
+
+	// Build HMAC signature
+	timestamp := fmt.Sprintf("%d", time.Now().Unix())
+	signaturePayload := timestamp + method + requestPath + body
+
+	// Decode secret using URL-safe base64
+	secretBytes, err := base64.URLEncoding.DecodeString(c.secret)
+	if err != nil {
+		err = fmt.Errorf("decode secret: %w", err)
+		return orders, err
+	}
+
+	// Generate HMAC-SHA256 signature
+	h := hmac.New(sha256.New, secretBytes)
+	h.Write([]byte(signaturePayload))
+	signature := base64.URLEncoding.EncodeToString(h.Sum(nil))
+
+	// Create request
+	url := "https://clob.polymarket.com" + requestPath
+	req, err := http.NewRequestWithContext(ctx, method, url, nil)
+	if err != nil {
+		err = fmt.Errorf("create request: %w", err)
+		return orders, err
+	}
+
+	// Set authentication headers
+	req.Header.Set("POLY_API_KEY", c.apiKey)
+	req.Header.Set("POLY_SIGNATURE", signature)
+	req.Header.Set("POLY_TIMESTAMP", timestamp)
+	req.Header.Set("POLY_PASSPHRASE", c.passphrase)
+	req.Header.Set("POLY_ADDRESS", c.address)
+
+	c.logger.Debug("fetching-open-orders",
+		zap.String("endpoint", requestPath))
+
+	// Make request
+	client := &http.Client{Timeout: 30 * time.Second}
+	httpResp, err := client.Do(req)
+	if err != nil {
+		err = fmt.Errorf("send request: %w", err)
+		return orders, err
+	}
+	defer httpResp.Body.Close()
+
+	// Read response
+	respBody, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		err = fmt.Errorf("read response: %w", err)
+		return orders, err
+	}
+
+	// Check status code
+	if httpResp.StatusCode != http.StatusOK {
+		c.logger.Error("fetch-orders-api-error",
+			zap.Int("status-code", httpResp.StatusCode),
+			zap.String("response-body", string(respBody)))
+		err = fmt.Errorf("API error (status %d): %s", httpResp.StatusCode, string(respBody))
+		return orders, err
+	}
+
+	// Log raw response for debugging
+	c.logger.Debug("fetch-orders-raw-response",
+		zap.String("body", string(respBody)))
+
+	// Parse response (API returns wrapper with "data" field)
+	var response OpenOrdersResponse
+	err = json.Unmarshal(respBody, &response)
+	if err != nil {
+		c.logger.Error("parse-orders-error",
+			zap.Error(err),
+			zap.String("response-body", string(respBody)))
+		err = fmt.Errorf("parse response: %w", err)
+		return orders, err
+	}
+
+	orders = response.Data
+	c.logger.Info("fetched-open-orders",
+		zap.Int("count", len(orders)))
+
+	return orders, nil
+}
+
+// CancelAllOrders cancels all open orders atomically via DELETE /cancel-all
+func (c *OrderClient) CancelAllOrders(ctx context.Context) (result CancelAllResult, err error) {
+	method := "DELETE"
+	requestPath := "/cancel-all"
+	body := ""
+
+	// Build HMAC signature
+	timestamp := fmt.Sprintf("%d", time.Now().Unix())
+	signaturePayload := timestamp + method + requestPath + body
+
+	// Decode secret using URL-safe base64
+	secretBytes, err := base64.URLEncoding.DecodeString(c.secret)
+	if err != nil {
+		err = fmt.Errorf("decode secret: %w", err)
+		return result, err
+	}
+
+	// Generate HMAC-SHA256 signature
+	h := hmac.New(sha256.New, secretBytes)
+	h.Write([]byte(signaturePayload))
+	signature := base64.URLEncoding.EncodeToString(h.Sum(nil))
+
+	// Create request
+	url := "https://clob.polymarket.com" + requestPath
+	req, err := http.NewRequestWithContext(ctx, method, url, nil)
+	if err != nil {
+		err = fmt.Errorf("create request: %w", err)
+		return result, err
+	}
+
+	// Set authentication headers
+	req.Header.Set("POLY_API_KEY", c.apiKey)
+	req.Header.Set("POLY_SIGNATURE", signature)
+	req.Header.Set("POLY_TIMESTAMP", timestamp)
+	req.Header.Set("POLY_PASSPHRASE", c.passphrase)
+	req.Header.Set("POLY_ADDRESS", c.address)
+
+	c.logger.Info("canceling-all-orders")
+
+	// Make request
+	client := &http.Client{Timeout: 30 * time.Second}
+	httpResp, err := client.Do(req)
+	if err != nil {
+		err = fmt.Errorf("send request: %w", err)
+		return result, err
+	}
+	defer httpResp.Body.Close()
+
+	// Read response
+	respBody, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		err = fmt.Errorf("read response: %w", err)
+		return result, err
+	}
+
+	// Check status code
+	if httpResp.StatusCode != http.StatusOK {
+		c.logger.Error("cancel-all-api-error",
+			zap.Int("status-code", httpResp.StatusCode),
+			zap.String("response-body", string(respBody)))
+		err = fmt.Errorf("API error (status %d): %s", httpResp.StatusCode, string(respBody))
+		return result, err
+	}
+
+	// Parse response
+	err = json.Unmarshal(respBody, &result)
+	if err != nil {
+		err = fmt.Errorf("parse response: %w", err)
+		return result, err
+	}
+
+	c.logger.Info("cancellation-completed",
+		zap.Int("canceled", len(result.Canceled)),
+		zap.Int("not-canceled", len(result.NotCanceled)))
+
+	return result, nil
 }

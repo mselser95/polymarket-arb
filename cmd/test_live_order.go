@@ -21,32 +21,37 @@ import (
 
 var testLiveOrderCmd = &cobra.Command{
 	Use:   "test-live-order <market-slug>",
-	Short: "Test live order submission and response parsing",
-	Long: `Submits test orders to the Polymarket CLOB API for a specific market.
-This is for testing order submission and response parsing.
+	Short: "Test live order submission using the exact same execution flow",
+	Long: `Submits test orders using the EXACT SAME flow as the arbitrage executor.
+This validates that the OrderClient and batch submission work correctly.
+
+Default: Small test order of $0.50 at low prices (0.01) to minimize risk.
 
 Modes:
   --paper  : Simulates API responses without hitting real API (safe testing)
-  --live   : Submits real orders to Polymarket CLOB API
+  --live   : Submits real orders to Polymarket CLOB API (default)
 
-Credentials are loaded from .env file automatically.
+IMPORTANT: Uses same PlaceOrdersMultiOutcome() as executor for validation.
 
 Example (Paper Trading - Safe):
   polymarket-arb test-live-order will-trump-release-the-epstein-files-by-december-22 --paper
 
-Example (Live Orders - Real money):
-  polymarket-arb test-live-order will-trump-release-the-epstein-files-by-december-22 --live`,
+Example (Live Orders - Small test with $0.50):
+  polymarket-arb test-live-order will-trump-release-the-epstein-files-by-december-22 --live
+
+Example (Live Orders - Custom size):
+  polymarket-arb test-live-order market-slug --live --size 2.0 --yes-price 0.01 --no-price 0.01`,
 	Args: cobra.ExactArgs(1),
 	RunE: runTestLiveOrder,
 }
 
 func init() {
 	rootCmd.AddCommand(testLiveOrderCmd)
-	testLiveOrderCmd.Flags().Float64P("size", "s", 1.0, "Order size in USD")
-	testLiveOrderCmd.Flags().Float64("yes-price", 0.01, "YES order price (limit price)")
-	testLiveOrderCmd.Flags().Float64("no-price", 0.01, "NO order price (limit price)")
-	testLiveOrderCmd.Flags().Bool("paper", true, "Paper trading mode (simulated responses)")
-	testLiveOrderCmd.Flags().Bool("live", false, "Live trading mode (real orders)")
+	testLiveOrderCmd.Flags().Float64P("size", "s", 0.5, "Order size in USD (default: $0.50 for safe testing)")
+	testLiveOrderCmd.Flags().Float64("yes-price", 0.01, "YES order price (low to avoid fills)")
+	testLiveOrderCmd.Flags().Float64("no-price", 0.01, "NO order price (low to avoid fills)")
+	testLiveOrderCmd.Flags().Bool("paper", false, "Paper trading mode (simulated responses)")
+	testLiveOrderCmd.Flags().Bool("live", true, "Live trading mode (real orders) - DEFAULT")
 	testLiveOrderCmd.Flags().Bool("mock", false, "Mock mode (uses saved API responses)")
 	testLiveOrderCmd.Flags().String("mock-response", "test_responses/order_success.json", "Path to mock response JSON file")
 }
@@ -317,8 +322,8 @@ func createOrderClient(logger *zap.Logger) (client *execution.OrderClient, err e
 		Secret:        cfg.Secret,
 		Passphrase:    cfg.Passphrase,
 		PrivateKey:    cfg.PrivateKey,
-		ProxyAddress:  cfg.Address, // Use configured address (proxy or EOA)
-		SignatureType: 0,            // EOA by default
+		ProxyAddress:  "", // Empty for EOA signatures (maker == signer)
+		SignatureType: 0,  // EOA by default
 		Logger:        logger,
 	}
 
@@ -336,9 +341,8 @@ func loadConfig() (*Config, error) {
 	cfg.Passphrase = getEnv("POLYMARKET_PASSPHRASE", "POLY_PASSPHRASE")
 	cfg.PrivateKey = getEnv("POLYMARKET_PRIVATE_KEY", "POLY_PRIVATE_KEY")
 
-	// Prefer POLYMARKET_PROXY_ADDRESS (for MetaMask/browser wallets)
-	// This is the address shown in Polymarket UI under profile
-	cfg.Address = getEnv("POLYMARKET_PROXY_ADDRESS", "POLYMARKET_ADDRESS", "POLY_ADDRESS")
+	// Load EOA address only (no proxy for EOA signatures)
+	cfg.Address = getEnv("POLYMARKET_ADDRESS", "POLY_ADDRESS")
 
 	if cfg.APIKey == "" {
 		return nil, fmt.Errorf("missing POLYMARKET_API_KEY in .env file")
@@ -350,18 +354,17 @@ func loadConfig() (*Config, error) {
 		return nil, fmt.Errorf("missing POLYMARKET_PASSPHRASE in .env file")
 	}
 
-	// Derive EOA address from private key if proxy not provided
-	// (Most users will have proxy address)
+	// Derive EOA address from private key if not provided
 	if cfg.Address == "" && cfg.PrivateKey != "" {
 		addr, err := deriveAddressFromPrivateKey(cfg.PrivateKey)
 		if err == nil {
 			cfg.Address = addr
-			fmt.Printf("Warning: Using EOA address (no proxy): %s\n", addr)
+			fmt.Printf("Using EOA address derived from private key: %s\n", addr)
 		}
 	}
 
 	if cfg.Address == "" {
-		return nil, fmt.Errorf("missing POLYMARKET_PROXY_ADDRESS in .env file")
+		return nil, fmt.Errorf("missing POLYMARKET_ADDRESS in .env file or unable to derive from private key")
 	}
 
 	return cfg, nil

@@ -51,6 +51,13 @@ type Config struct {
 	ExecutionMode            string
 	ExecutionMaxPositionSize float64
 
+	// Execution - Fill Verification
+	ExecutionAggressionTicks  int           // Ticks above ask to place order
+	ExecutionFillTimeout      time.Duration // Max wait for 100% fill
+	ExecutionFillRetryInitial time.Duration // Initial backoff for fill queries
+	ExecutionFillRetryMax     time.Duration // Max backoff between queries
+	ExecutionFillRetryMult    float64       // Exponential backoff multiplier
+
 	// Circuit Breaker
 	CircuitBreakerEnabled         bool
 	CircuitBreakerCheckInterval   time.Duration
@@ -112,6 +119,13 @@ func LoadFromEnv() (*Config, error) {
 		ExecutionMode:            getEnvOrDefault("EXECUTION_MODE", "paper"),
 		ExecutionMaxPositionSize: getFloat64OrDefault("EXECUTION_MAX_POSITION_SIZE", 1000.0),
 
+		// Execution - Fill Verification defaults
+		ExecutionAggressionTicks:  getIntOrDefault("EXECUTION_AGGRESSION_TICKS", 5),
+		ExecutionFillTimeout:      getDurationOrDefault("EXECUTION_FILL_TIMEOUT", 30*time.Second),
+		ExecutionFillRetryInitial: getDurationOrDefault("EXECUTION_FILL_RETRY_INITIAL", 2*time.Second),
+		ExecutionFillRetryMax:     getDurationOrDefault("EXECUTION_FILL_RETRY_MAX", 16*time.Second),
+		ExecutionFillRetryMult:    getFloat64OrDefault("EXECUTION_FILL_RETRY_MULTIPLIER", 2.0),
+
 		// Circuit Breaker defaults
 		CircuitBreakerEnabled:         getBoolOrDefault("CIRCUIT_BREAKER_ENABLED", true),
 		CircuitBreakerCheckInterval:   getDurationOrDefault("CIRCUIT_BREAKER_CHECK_INTERVAL", 300*time.Second),
@@ -151,8 +165,8 @@ func (c *Config) Validate() (err error) {
 		return errors.New("POLYMARKET_GAMMA_API_URL cannot be empty")
 	}
 
-	if c.ArbThreshold <= 0 || c.ArbThreshold >= 1.0 {
-		return fmt.Errorf("ARB_THRESHOLD must be between 0 and 1.0, got %f", c.ArbThreshold)
+	if c.ArbThreshold <= 0 || c.ArbThreshold > 1.10 {
+		return fmt.Errorf("ARB_THRESHOLD must be between 0 and 1.10 (values > 1.0 for research mode), got %f", c.ArbThreshold)
 	}
 
 	if c.ExecutionMode != "paper" && c.ExecutionMode != "live" && c.ExecutionMode != "dry-run" {

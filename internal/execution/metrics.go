@@ -66,4 +66,27 @@ var (
 		},
 		[]string{"reason"},
 	)
+
+	// FillVerificationTotal tracks fill verification attempts by result.
+	FillVerificationTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "polymarket_execution_fill_verification_total",
+			Help: "Total fill verification attempts by result (success, partial, timeout)",
+		},
+		[]string{"result"},
+	)
+
+	// FillVerificationDurationSeconds tracks fill verification duration.
+	FillVerificationDurationSeconds = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "polymarket_execution_fill_verification_duration_seconds",
+		Help:    "Duration of fill verification process",
+		Buckets: []float64{1, 2, 5, 10, 20, 30, 60},
+	})
+
+	// ActualFillPriceDeviation tracks difference between expected and actual fill prices.
+	ActualFillPriceDeviation = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "polymarket_execution_actual_fill_price_deviation",
+		Help:    "Difference between expected and actual fill price",
+		Buckets: prometheus.LinearBuckets(-0.01, 0.001, 20),
+	})
 )

@@ -3,6 +3,7 @@ package execution
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,14 @@ type Executor struct {
 	mu               sync.Mutex
 	orderClient      *OrderClient // For live trading
 	circuitBreaker   *circuitbreaker.BalanceCircuitBreaker
+
+	// Fill verification config
+	aggressionTicks  int
+	fillTimeout      time.Duration
+	fillRetryInitial time.Duration
+	fillRetryMax     time.Duration
+	fillRetryMult    float64
+	takerFee         float64
 }
 
 // Config holds executor configuration.
@@ -34,16 +43,30 @@ type Config struct {
 	OpportunityChannel <-chan *arbitrage.Opportunity
 	OrderClient        *OrderClient                          // Optional: for live trading
 	CircuitBreaker     *circuitbreaker.BalanceCircuitBreaker // Optional: for balance monitoring
+
+	// Fill verification config
+	AggressionTicks  int
+	FillTimeout      time.Duration
+	FillRetryInitial time.Duration
+	FillRetryMax     time.Duration
+	FillRetryMult    float64
+	TakerFee         float64
 }
 
 // New creates a new trade executor.
 func New(cfg *Config) *Executor {
 	return &Executor{
-		mode:            cfg.Mode,
-		logger:          cfg.Logger,
-		opportunityChan: cfg.OpportunityChannel,
-		orderClient:     cfg.OrderClient,
-		circuitBreaker:  cfg.CircuitBreaker,
+		mode:             cfg.Mode,
+		logger:           cfg.Logger,
+		opportunityChan:  cfg.OpportunityChannel,
+		orderClient:      cfg.OrderClient,
+		circuitBreaker:   cfg.CircuitBreaker,
+		aggressionTicks:  cfg.AggressionTicks,
+		fillTimeout:      cfg.FillTimeout,
+		fillRetryInitial: cfg.FillRetryInitial,
+		fillRetryMax:     cfg.FillRetryMax,
+		fillRetryMult:    cfg.FillRetryMult,
+		takerFee:         cfg.TakerFee,
 	}
 }
 
@@ -207,6 +230,49 @@ func (e *Executor) executePaper(opp *arbitrage.Opportunity) *types.ExecutionResu
 	return result
 }
 
+// adjustPriceForAggression adjusts the ask price upward by N ticks to improve fill probability.
+func adjustPriceForAggression(askPrice, tickSize float64, aggressionTicks int) (adjustedPrice float64) {
+	adjustedPrice = askPrice + (tickSize * float64(aggressionTicks))
+
+	// Cap at 0.9999 (max valid price on Polymarket)
+	if adjustedPrice > 0.9999 {
+		adjustedPrice = 0.9999
+	}
+
+	// Round to tick size boundaries
+	adjustedPrice = math.Round(adjustedPrice/tickSize) * tickSize
+
+	return adjustedPrice
+}
+
+// calculateActualProfit computes profit from fill verification results.
+// Returns (actualProfit, allFilled).
+// Requires all orders to be 100% filled; partial fills return 0.0, false.
+func calculateActualProfit(fills []types.FillStatus, takerFee float64) (actualProfit float64, allFilled bool) {
+	allFilled = true
+	totalCost := 0.0
+	tokenCount := 0.0
+
+	for i, fill := range fills {
+		if !fill.FullyFilled {
+			return 0.0, false // Require 100% fill
+		}
+		totalCost += fill.SizeFilled * fill.ActualPrice
+
+		// All outcomes should have equal token counts (arbitrage strategy)
+		if i == 0 {
+			tokenCount = fill.SizeFilled
+		}
+	}
+
+	// Revenue from winning outcome: tokenCount * $1.00
+	revenue := tokenCount
+	fees := totalCost * takerFee
+	actualProfit = revenue - totalCost - fees
+
+	return actualProfit, true
+}
+
 // executeLive executes a live trade via Polymarket CLOB API.
 // Supports both binary (2 outcomes) and multi-outcome (3+) markets.
 // All orders are submitted atomically via the batch API endpoint.
@@ -256,16 +322,39 @@ func (e *Executor) executeLive(opp *arbitrage.Opportunity) *types.ExecutionResul
 			zap.Float64("size", opp.MaxTradeSize),
 		}, outcomeLogFields...)...)
 
-	// Build outcome parameters for order client
+	// Build outcome parameters for order client with aggressive pricing
 	outcomeParams := make([]OutcomeOrderParams, len(opp.Outcomes))
+	adjustedPrices := make([]float64, len(opp.Outcomes))
+
 	for i, outcome := range opp.Outcomes {
+		// Adjust price upward by N ticks to jump queue and ensure fills
+		adjustedPrice := adjustPriceForAggression(outcome.AskPrice, outcome.TickSize, e.aggressionTicks)
+		adjustedPrices[i] = adjustedPrice
+
 		outcomeParams[i] = OutcomeOrderParams{
 			TokenID:  outcome.TokenID,
-			Price:    outcome.AskPrice,
+			Price:    adjustedPrice, // Use adjusted price, not raw ask
 			TickSize: outcome.TickSize,
 			MinSize:  outcome.MinSize,
 		}
 	}
+
+	e.logger.Info("using-aggressive-pricing",
+		zap.Int("aggression-ticks", e.aggressionTicks),
+		zap.Float64("original-ask-sum", func() float64 {
+			sum := 0.0
+			for _, o := range opp.Outcomes {
+				sum += o.AskPrice
+			}
+			return sum
+		}()),
+		zap.Float64("adjusted-ask-sum", func() float64 {
+			sum := 0.0
+			for _, p := range adjustedPrices {
+				sum += p
+			}
+			return sum
+		}()))
 
 	// Place orders using batch endpoint for atomic submission
 	ctx, cancel := context.WithTimeout(e.ctx, 30*time.Second)
@@ -296,12 +385,16 @@ func (e *Executor) executeLive(opp *arbitrage.Opportunity) *types.ExecutionResul
 		}
 	}
 
-	// Verify all orders succeeded
+	// Verify all orders succeeded AND have valid order IDs
 	var failedOutcomes []string
 	for i, resp := range responses {
 		if !resp.Success {
 			failedOutcomes = append(failedOutcomes,
 				fmt.Sprintf("%s: %s", opp.Outcomes[i].Outcome, resp.ErrorMsg))
+		} else if resp.OrderID == "" {
+			// Order returned success but no order ID - this is a problem
+			failedOutcomes = append(failedOutcomes,
+				fmt.Sprintf("%s: empty order ID", opp.Outcomes[i].Outcome))
 		}
 	}
 
@@ -321,71 +414,143 @@ func (e *Executor) executeLive(opp *arbitrage.Opportunity) *types.ExecutionResul
 		}
 	}
 
-	// Create trade records for all outcomes
-	trades := make([]*types.Trade, len(opp.Outcomes))
-	for i, outcome := range opp.Outcomes {
-		trades[i] = &types.Trade{
-			Outcome:   outcome.Outcome,
-			Side:      "BUY",
-			Price:     outcome.AskPrice,
-			Size:      opp.MaxTradeSize,
-			Timestamp: now,
-		}
+	// Extract order IDs for fill verification
+	orderIDs := make([]string, len(responses))
+	outcomes := make([]string, len(opp.Outcomes))
+	expectedSizes := make([]float64, len(opp.Outcomes))
 
-		// Update metrics for each outcome
-		TradesTotal.WithLabelValues("live", outcome.Outcome).Inc()
+	for i, resp := range responses {
+		orderIDs[i] = resp.OrderID
+		outcomes[i] = opp.Outcomes[i].Outcome
+		expectedSizes[i] = opp.MaxTradeSize // Total USDC to spend
 	}
 
-	// Calculate realized profit
-	realizedProfit := opp.MaxTradeSize * opp.ProfitMargin
+	// Calculate expected profit based on adjusted prices
+	expectedProfit := opp.MaxTradeSize * opp.ProfitMargin
 
-	// Update metrics
-	ProfitRealizedUSD.WithLabelValues("live").Add(realizedProfit)
-
-	// Update cumulative profit
-	e.mu.Lock()
-	e.cumulativeProfit += realizedProfit
-	cumulativeProfit := e.cumulativeProfit
-	e.mu.Unlock()
-
-	// Build log fields for order IDs and statuses
-	orderLogFields := make([]zap.Field, 0, len(responses)*3)
+	// Build log fields for order IDs
+	orderLogFields := make([]zap.Field, 0, len(responses)*2)
 	for i, resp := range responses {
 		orderLogFields = append(orderLogFields,
 			zap.String(fmt.Sprintf("outcome%d", i+1), opp.Outcomes[i].Outcome),
-			zap.String(fmt.Sprintf("order-id%d", i+1), resp.OrderID),
-			zap.String(fmt.Sprintf("status%d", i+1), resp.Status))
+			zap.String(fmt.Sprintf("order-id%d", i+1), resp.OrderID))
 	}
 
-	e.logger.Info("live-multi-outcome-trade-executed",
+	e.logger.Info("orders-placed-verifying-fills",
 		append([]zap.Field{
 			zap.String("market-slug", opp.MarketSlug),
-			zap.String("question", opp.MarketQuestion),
 			zap.Int("outcome-count", len(opp.Outcomes)),
-			zap.Float64("size", opp.MaxTradeSize),
-			zap.Int("profit-bps", opp.ProfitBPS),
-			zap.Float64("profit-usd", realizedProfit),
-			zap.Float64("cumulative-profit-usd", cumulativeProfit),
+			zap.Float64("size-usd", opp.MaxTradeSize),
+			zap.Float64("expected-profit-usd", expectedProfit),
+			zap.String("note", "spawning goroutine for fill verification"),
 		}, orderLogFields...)...)
 
-	// Create execution result
+	// Spawn non-blocking goroutine for fill verification and metric updates
+	go e.verifyFillsAndUpdateMetrics(orderIDs, outcomes, expectedSizes, adjustedPrices, opp, expectedProfit, now)
+
+	// Return immediately with partial result (orders placed but not yet verified)
 	result := &types.ExecutionResult{
 		OpportunityID:  opp.ID,
 		MarketSlug:     opp.MarketSlug,
 		ExecutedAt:     now,
-		AllTrades:      trades,
-		RealizedProfit: realizedProfit,
-		Success:        true,
+		OrderIDs:       orderIDs,
+		ExpectedProfit: expectedProfit,
+		Success:        true, // Orders placed successfully
 		Error:          nil,
 	}
 
-	// For backward compatibility with binary markets, set YesTrade/NoTrade
-	if len(trades) == 2 {
-		result.YesTrade = trades[0]
-		result.NoTrade = trades[1]
+	return result
+}
+
+// verifyFillsAndUpdateMetrics runs in a goroutine to verify fills and update metrics asynchronously.
+func (e *Executor) verifyFillsAndUpdateMetrics(
+	orderIDs []string,
+	outcomes []string,
+	expectedSizes []float64,
+	adjustedPrices []float64,
+	opp *arbitrage.Opportunity,
+	expectedProfit float64,
+	executedAt time.Time,
+) {
+	// Create a new context for fill verification (independent of request context)
+	ctx, cancel := context.WithTimeout(context.Background(), e.fillTimeout+10*time.Second)
+	defer cancel()
+
+	// Create fill tracker
+	fillTracker := NewFillTracker(
+		e.orderClient,
+		e.logger,
+		&FillTrackerConfig{
+			InitialBackoff: e.fillRetryInitial,
+			MaxBackoff:     e.fillRetryMax,
+			BackoffMult:    e.fillRetryMult,
+			FillTimeout:    e.fillTimeout,
+		},
+	)
+
+	// Verify fills with exponential backoff
+	fillStartTime := time.Now()
+	fillStatuses, err := fillTracker.VerifyFills(ctx, orderIDs, outcomes, expectedSizes)
+	fillDuration := time.Since(fillStartTime)
+
+	// Update fill verification duration metric
+	FillVerificationDurationSeconds.Observe(fillDuration.Seconds())
+
+	if err != nil {
+		e.logger.Error("fill-verification-failed",
+			zap.String("opportunity-id", opp.ID),
+			zap.String("market-slug", opp.MarketSlug),
+			zap.Error(err))
+		FillVerificationTotal.WithLabelValues("error").Inc()
+		return
 	}
 
-	return result
+	// Calculate actual profit from fill data
+	actualProfit, allFilled := calculateActualProfit(fillStatuses, e.takerFee)
+
+	// Update metrics and logs based on fill status
+	if allFilled {
+		FillVerificationTotal.WithLabelValues("success").Inc()
+
+		// Update profit metrics ONLY after 100% fill confirmation
+		ProfitRealizedUSD.WithLabelValues("live").Add(actualProfit)
+
+		e.mu.Lock()
+		e.cumulativeProfit += actualProfit
+		cumulativeActualProfit := e.cumulativeProfit
+		e.mu.Unlock()
+
+		e.logger.Info("all-orders-fully-filled",
+			zap.String("opportunity-id", opp.ID),
+			zap.String("market-slug", opp.MarketSlug),
+			zap.Float64("expected-profit-usd", expectedProfit),
+			zap.Float64("actual-profit-usd", actualProfit),
+			zap.Float64("profit-deviation-usd", actualProfit-expectedProfit),
+			zap.Float64("cumulative-actual-profit-usd", cumulativeActualProfit),
+			zap.Duration("fill-duration", fillDuration))
+
+		// Update trade count metrics for each filled outcome
+		for _, fill := range fillStatuses {
+			if fill.FullyFilled {
+				TradesTotal.WithLabelValues("live", fill.Outcome).Inc()
+			}
+		}
+	} else {
+		FillVerificationTotal.WithLabelValues("partial").Inc()
+
+		e.logger.Warn("orders-not-fully-filled",
+			zap.String("opportunity-id", opp.ID),
+			zap.String("market-slug", opp.MarketSlug),
+			zap.Duration("fill-duration", fillDuration))
+	}
+
+	// Track price deviation for each fill
+	for i, fill := range fillStatuses {
+		if fill.FullyFilled && i < len(adjustedPrices) {
+			deviation := fill.ActualPrice - adjustedPrices[i]
+			ActualFillPriceDeviation.Observe(deviation)
+		}
+	}
 }
 
 // Close gracefully closes the executor.

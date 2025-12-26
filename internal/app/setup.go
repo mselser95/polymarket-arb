@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/crypto"
@@ -270,12 +271,58 @@ func setupExecutor(
 		}
 	}
 
+	// Create OrderClient for live trading
+	var orderClient *execution.OrderClient
+	if cfg.ExecutionMode == "live" {
+		// Read credentials from environment
+		privateKey := os.Getenv("POLYMARKET_PRIVATE_KEY")
+		if privateKey == "" {
+			logger.Warn("order-client-not-configured-missing-private-key")
+		} else {
+			// Parse signature type, default to 0 (EOA)
+			signatureType := 0
+			if sigTypeStr := os.Getenv("POLYMARKET_SIGNATURE_TYPE"); sigTypeStr != "" {
+				if parsed, parseErr := strconv.Atoi(sigTypeStr); parseErr == nil {
+					signatureType = parsed
+				}
+			}
+
+			orderClientCfg := &execution.OrderClientConfig{
+				APIKey:        cfg.PolymarketAPIKey,
+				Secret:        cfg.PolymarketSecret,
+				Passphrase:    cfg.PolymarketPassphrase,
+				PrivateKey:    privateKey,
+				Address:       os.Getenv("POLYMARKET_ADDRESS"),
+				ProxyAddress:  "", // Empty for EOA signatures (maker == signer)
+				SignatureType: signatureType,
+				Logger:        logger,
+			}
+
+			orderClient, err = execution.NewOrderClient(orderClientCfg)
+			if err != nil {
+				return nil, fmt.Errorf("create order client: %w", err)
+			}
+
+			logger.Info("order-client-configured",
+				zap.String("mode", "live"),
+				zap.String("address", orderClientCfg.Address))
+		}
+	}
+
 	executor = execution.New(&execution.Config{
 		Mode:               cfg.ExecutionMode,
 		MaxPositionSize:    cfg.ExecutionMaxPositionSize,
 		Logger:             logger,
 		OpportunityChannel: arbDetector.OpportunityChan(),
+		OrderClient:        orderClient,
 		CircuitBreaker:     breaker,
+		// Fill verification config
+		AggressionTicks:  cfg.ExecutionAggressionTicks,
+		FillTimeout:      cfg.ExecutionFillTimeout,
+		FillRetryInitial: cfg.ExecutionFillRetryInitial,
+		FillRetryMax:     cfg.ExecutionFillRetryMax,
+		FillRetryMult:    cfg.ExecutionFillRetryMult,
+		TakerFee:         cfg.ArbTakerFee,
 	})
 
 	return executor, nil
