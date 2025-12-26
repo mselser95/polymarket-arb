@@ -67,8 +67,8 @@ func TestNew(t *testing.T) {
 		t.Error("expected non-nil new markets channel")
 	}
 
-	if cap(svc.newMarketsCh) != 100 {
-		t.Errorf("expected channel capacity 100, got %d", cap(svc.newMarketsCh))
+	if cap(svc.newMarketsCh) != 2000 {
+		t.Errorf("expected channel capacity 2000, got %d", cap(svc.newMarketsCh))
 	}
 }
 

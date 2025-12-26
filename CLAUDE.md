@@ -6,7 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 High-frequency trading bot for detecting and executing arbitrage opportunities on Polymarket prediction markets. Uses event-driven architecture with WebSocket feeds, optimized for low latency (<1ms arbitrage detection).
 
-**Key Arbitrage Strategy:** When YES best bid + NO best bid < threshold (typically 0.995), both positions guarantee profit since exactly one pays out $1.00.
+**Key Arbitrage Strategies:**
+- **Binary Markets (2 outcomes):** When YES ASK + NO ASK < threshold (typically 0.995), buying both positions guarantees profit since exactly one pays out $1.00
+- **Multi-Outcome Markets (3+ outcomes):** When SUM(all outcome ASK prices) < threshold, buying all outcomes guarantees profit since exactly one pays out $1.00
+
+**Examples:**
+- Binary: YES=0.48, NO=0.48 → Sum=0.96 < 0.995 → Profit: $4 per $100
+- 3-candidate election: A=0.32, B=0.32, C=0.32 → Sum=0.96 < 0.995 → Profit: $4 per $100
+- 10-team sports: Sum of all outcomes=0.90 → Profit: $10 per $100 (minus ~1% fees)
 
 ## Architecture
 
@@ -27,11 +34,11 @@ WebSocket → OrderbookManager → ArbitrageDetector → Executor
 
 ### Key Components
 
-1. **Discovery Service** (`internal/discovery/`): Polls Gamma API for active markets, implements differential discovery
-2. **WebSocket Manager** (`pkg/websocket/`): Persistent connection with auto-reconnect, exponential backoff
-3. **Orderbook Manager** (`internal/orderbook/`): In-memory snapshots, emits update events to subscribers
-4. **Arbitrage Detector** (`internal/arbitrage/`): Event-driven, checks opportunities on orderbook updates
-5. **Executor** (`internal/execution/`): Paper/live trading modes, tracks cumulative profit
+1. **Discovery Service** (`internal/discovery/`): Polls Gamma API for active markets, supports both binary and multi-outcome markets
+2. **WebSocket Manager** (`pkg/websocket/`): Persistent connection with auto-reconnect, exponential backoff, multiplexes all token subscriptions
+3. **Orderbook Manager** (`internal/orderbook/`): In-memory snapshots per token, emits update events to subscribers
+4. **Arbitrage Detector** (`internal/arbitrage/`): Event-driven N-way arbitrage detection (binary + multi-outcome support)
+5. **Executor** (`internal/execution/`): Paper/live trading modes with atomic batch order submission, tracks cumulative profit
 
 ### WebSocket Connection Architecture
 
@@ -46,11 +53,13 @@ Discovery → Manager.Subscribe(tokenIDs) → WebSocket
      ↓                                           ↓
 New Markets                              Single Connection
      ↓                                           ↓
-TokenIDs: [YES, NO] × N markets         Multiplexed Stream
+TokenIDs: All outcomes × N markets      Multiplexed Stream
 ```
 
 **Key Characteristics:**
-- Each market requires 2 token subscriptions (YES + NO outcome tokens)
+- Binary markets: 2 token subscriptions (YES, NO)
+- Multi-outcome markets: N token subscriptions (one per outcome, e.g. 10 candidates in election)
+- All subscriptions multiplexed over single WebSocket connection
 - Initial subscription uses `{"assets_ids": [...], "type": "market"}` message
 - Dynamic subscriptions (adding markets) use `{"assets_ids": [...], "operation": "subscribe"}` message
 - Messages received: `book` (full snapshot), `price_change` (incremental update), heartbeats (empty array `[]`)
@@ -240,6 +249,116 @@ go run . redeem-positions --rpc https://polygon-mainnet.g.alchemy.com/v2/YOUR_KE
 - Gas limit: ~200,000 per redemption
 - Winning outcome tokens are burned and USDC is released
 
+## Multi-Outcome Arbitrage Support
+
+### Overview
+
+The bot fully supports N-way arbitrage detection and execution for markets with 2+ outcomes (binary, elections, sports betting, etc.).
+
+### Detection Logic
+
+**Binary Markets (2 outcomes):**
+```
+IF (YES_ASK + NO_ASK) < threshold AND net_profit > 0 AFTER fees:
+  → Create opportunity
+```
+
+**Multi-Outcome Markets (3+ outcomes):**
+```
+IF SUM(all outcome ASK prices) < threshold AND net_profit > 0 AFTER fees:
+  → Create opportunity
+```
+
+**Fee Calculation:**
+- Gross profit = (1.0 - price_sum) × trade_size
+- Total fees = total_cost × taker_fee (1% per outcome)
+- Net profit = gross_profit - total_fees
+- **Critical:** Opportunities are rejected if net_profit ≤ 0
+
+**Size Constraints:**
+- MaxTradeSize = MIN(all outcome best_ask_sizes, config.MaxTradeSize)
+- Must meet config.MinTradeSize requirement
+- Respects market metadata (tick_size, min_size per outcome)
+
+### Implementation Files
+
+**Detection:** `internal/arbitrage/detector.go`
+- `detectMultiOutcome()`: N-way arbitrage check (lines 209-400)
+- Loops through all outcome orderbooks
+- Validates prices/sizes, calculates sum, checks threshold
+- Creates `Opportunity` with `[]OpportunityOutcome`
+
+**Execution:** `internal/execution/executor.go`
+- `executePaper()`: Simulates buying all outcomes (lines 138-208)
+- `executeLive()`: Atomic batch order submission via CLOB API (lines 210-389)
+- Both support N outcomes with dynamic logging
+
+**Order Client:** `internal/execution/order_client.go`
+- `PlaceOrdersMultiOutcome()`: Batch API submission for N orders (lines 392-499)
+- Builds N signed orders and submits atomically
+- Returns array of responses, validates all succeeded
+
+### Market Subscription Flow
+
+**Discovery → Subscription:**
+1. Discovery finds market with N outcomes (e.g., 10 candidates)
+2. `subscribeToMarket()` loops through ALL tokens (`internal/app/markets.go:26-76`)
+3. Subscribes to all token IDs via single WebSocket call
+4. Logs: `subscribed-to-market` with `outcome-count` and `outcomes` array
+
+**Orderbook Updates:**
+1. WebSocket receives updates for each token ID
+2. Orderbook manager tracks separate snapshot per token
+3. Detector checks arbitrage when ANY outcome's orderbook updates
+4. Opportunity created only if ALL orderbooks exist and valid
+
+### Testing
+
+**Unit Tests:** `internal/arbitrage/detector_multioutcome_test.go`
+- 21 test scenarios covering 3-outcome, 4-outcome, 5-outcome, 10-outcome markets
+- Edge cases: invalid prices, zero sizes, fee calculations, size constraints
+- Binary backward compatibility verified
+
+**Key Test Cases:**
+- `3-outcome-arbitrage-exists`: Sum=0.96, net profit ~304 bps
+- `high-fees-eliminate-profit`: Sum=0.99, fees exceed profit (rejected)
+- `10-outcome-arbitrage`: Stress test with 10 simultaneous orders
+- `above-max-size-caps-correctly`: Verifies maxTradeSize enforcement
+
+### Live Trading Requirements
+
+**Order Submission:**
+- Uses Polymarket `/orders` (plural) batch endpoint
+- Atomic submission: all N orders in single API call
+- L2 authentication: HMAC signature with API credentials
+- Same security guarantees as binary markets
+
+**Example 3-Outcome Execution:**
+```
+Opportunity: Candidate A=0.32, B=0.32, C=0.32, size=100
+  → Build 3 signed orders
+  → Submit batch: [orderA, orderB, orderC]
+  → API returns: [respA, respB, respC]
+  → Verify all succeeded
+  → Update metrics and log trade
+```
+
+**Backward Compatibility:**
+- `ExecutionResult.AllTrades` stores all N trades
+- `ExecutionResult.YesTrade/NoTrade` populated for binary markets
+- Metrics track trades per outcome: `trades_total{mode="live", outcome="Candidate A"}`
+
+### Differences vs Binary Markets
+
+| Aspect | Binary Markets | Multi-Outcome Markets |
+|--------|----------------|----------------------|
+| Detection | Sum 2 prices | Sum N prices |
+| Subscriptions | 2 token IDs | N token IDs |
+| Order Submission | 2 orders in batch | N orders in batch |
+| Fee Calculation | 2 × taker_fee | N × taker_fee |
+| Size Constraint | MIN(yes_size, no_size) | MIN(all N sizes) |
+| Execution Risk | Same (atomic batch) | Same (atomic batch) |
+
 ## Code Organization
 
 ### Package Structure
@@ -289,6 +408,14 @@ All config loaded via environment variables with defaults. See `LoadFromEnv()` f
 - `ARB_MAX_MARKET_DURATION=1h`: Only subscribe to markets expiring within this window (filters long-running markets)
 - `EXECUTION_MODE=dry-run`: dry-run (detect only), paper (simulated), or live (real trades)
 - `STORAGE_MODE=console`: console (stdout) or postgres
+
+**WebSocket & Performance:**
+- `WS_POOL_SIZE=20`: Number of WebSocket connections (default: 20, max: 20)
+- `WS_MESSAGE_BUFFER_SIZE=10000`: Per-connection message buffer (default: 10,000)
+- Orderbook update channel: 10,000 message buffer
+- Arbitrage opportunity channel: 500 message buffer
+- Discovery new markets channel: 5,000 message buffer
+- **Docker CPU limit**: 2.0 CPUs (configurable in docker-compose.yml)
 
 **Circuit Breaker (Balance Protection):**
 
@@ -811,7 +938,7 @@ For off-chain order placement:
 #### 02 - System Health (15 panels)
 **Focus**: Operational health of all components
 - WebSocket connection status
-- WebSocket pool status (5 connections)
+- WebSocket pool status (20 connections)
 - Pool subscription distribution
 - Pool multiplex latency
 - Message processing latency (p99)
@@ -919,10 +1046,49 @@ For off-chain order placement:
 - **Cache Hit Rate**: Should be >80% for optimal performance (Dashboard 07, 02)
 - **Circuit Breaker State**: Understand execution halts (Dashboard 05)
 - **Error Ratio**: Should be <1% (Dashboard 06)
-- **WebSocket Pool**: All 5 connections active (Dashboard 02)
+- **WebSocket Pool**: All 20 connections active (Dashboard 02)
 - **Opportunities Skipped**: Identify lost trading chances (Dashboard 06)
 
 **Health check:** `GET http://localhost:8080/health`
+
+**Orderbook API:** `GET http://localhost:8080/api/orderbook?slug=<market-slug>`
+
+Returns live orderbook data (best bid/ask) for all outcomes in a market:
+```bash
+# Example request
+curl "http://localhost:8080/api/orderbook?slug=will-bitcoin-hit-100k"
+
+# Example response
+{
+  "market_id": "0x1234...",
+  "market_slug": "will-bitcoin-hit-100k",
+  "question": "Will Bitcoin hit $100k in 2025?",
+  "outcomes": [
+    {
+      "outcome": "Yes",
+      "token_id": "0xabc...",
+      "best_bid_price": 0.48,
+      "best_bid_size": 150.0,
+      "best_ask_price": 0.52,
+      "best_ask_size": 120.0
+    },
+    {
+      "outcome": "No",
+      "token_id": "0xdef...",
+      "best_bid_price": 0.47,
+      "best_bid_size": 200.0,
+      "best_ask_price": 0.53,
+      "best_ask_size": 180.0
+    }
+  ]
+}
+```
+
+**Notes:**
+- Only returns data for markets currently subscribed by the bot
+- Multi-outcome markets return N outcome objects (3+ for elections, sports, etc.)
+- Returns 404 if market not found or not subscribed
+- Returns 400 if slug parameter missing
 
 **Debugging:**
 - Set `LOG_LEVEL=debug` for verbose logging

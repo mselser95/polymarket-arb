@@ -208,12 +208,8 @@ func (e *Executor) executePaper(opp *arbitrage.Opportunity) *types.ExecutionResu
 }
 
 // executeLive executes a live trade via Polymarket CLOB API.
-// LIMITATION: Currently only supports binary markets (2 outcomes) due to PlaceOrdersBatch API.
-// Multi-outcome markets would require either:
-// - Sequential order placement (higher latency, partial fill risk)
-// - Polymarket CLOB batch API for N orders (not yet implemented)
-//
-// Use paper mode for testing multi-outcome markets.
+// Supports both binary (2 outcomes) and multi-outcome (3+) markets.
+// All orders are submitted atomically via the batch API endpoint.
 func (e *Executor) executeLive(opp *arbitrage.Opportunity) *types.ExecutionResult {
 	now := time.Now()
 
@@ -228,80 +224,65 @@ func (e *Executor) executeLive(opp *arbitrage.Opportunity) *types.ExecutionResul
 		}
 	}
 
-	// Only execute binary markets (2 outcomes) in live mode
-	if len(opp.Outcomes) != 2 {
-		e.logger.Info("skipping-multi-outcome-live-execution",
-			zap.String("opportunity-id", opp.ID),
+	// Validate all outcomes have token IDs
+	for i, outcome := range opp.Outcomes {
+		if outcome.TokenID == "" {
+			e.logger.Error("missing-token-id",
+				zap.String("opportunity-id", opp.ID),
+				zap.Int("outcome-index", i),
+				zap.String("outcome", outcome.Outcome))
+			return &types.ExecutionResult{
+				OpportunityID: opp.ID,
+				MarketSlug:    opp.MarketSlug,
+				ExecutedAt:    now,
+				Success:       false,
+				Error:         fmt.Errorf("missing token ID for outcome %d (%s)", i, outcome.Outcome),
+			}
+		}
+	}
+
+	// Build log fields for all outcomes
+	outcomeLogFields := make([]zap.Field, 0, len(opp.Outcomes)*2)
+	for i, outcome := range opp.Outcomes {
+		outcomeLogFields = append(outcomeLogFields,
+			zap.String(fmt.Sprintf("outcome%d", i+1), outcome.Outcome),
+			zap.Float64(fmt.Sprintf("price%d", i+1), outcome.AskPrice))
+	}
+
+	e.logger.Info("placing-multi-outcome-orders",
+		append([]zap.Field{
 			zap.String("market-slug", opp.MarketSlug),
 			zap.Int("outcome-count", len(opp.Outcomes)),
-			zap.Float64("net-profit-usd", opp.NetProfit),
-			zap.String("reason", "live execution requires batch API for N>2 outcomes"))
-		OpportunitiesSkippedTotal.WithLabelValues("multi_outcome_live").Inc()
-		return &types.ExecutionResult{
-			OpportunityID: opp.ID,
-			MarketSlug:    opp.MarketSlug,
-			ExecutedAt:    now,
-			Success:       false,
-			Error:         fmt.Errorf("live execution only supports binary markets (got %d outcomes) - use paper mode for multi-outcome", len(opp.Outcomes)),
+			zap.Float64("size", opp.MaxTradeSize),
+		}, outcomeLogFields...)...)
+
+	// Build outcome parameters for order client
+	outcomeParams := make([]OutcomeOrderParams, len(opp.Outcomes))
+	for i, outcome := range opp.Outcomes {
+		outcomeParams[i] = OutcomeOrderParams{
+			TokenID:  outcome.TokenID,
+			Price:    outcome.AskPrice,
+			TickSize: outcome.TickSize,
+			MinSize:  outcome.MinSize,
 		}
 	}
-
-	// Extract binary outcomes
-	outcome1 := opp.Outcomes[0]
-	outcome2 := opp.Outcomes[1]
-
-	// Get token IDs from outcomes
-	if outcome1.TokenID == "" || outcome2.TokenID == "" {
-		e.logger.Error("missing-token-ids")
-		return &types.ExecutionResult{
-			OpportunityID: opp.ID,
-			MarketSlug:    opp.MarketSlug,
-			ExecutedAt:    now,
-			Success:       false,
-			Error:         fmt.Errorf("missing token IDs"),
-		}
-	}
-
-	e.logger.Info("placing-orders",
-		zap.String("market-slug", opp.MarketSlug),
-		zap.Float64("outcome1-price", outcome1.AskPrice),
-		zap.Float64("outcome2-price", outcome2.AskPrice),
-		zap.Float64("size", opp.MaxTradeSize))
 
 	// Place orders using batch endpoint for atomic submission
 	ctx, cancel := context.WithTimeout(e.ctx, 30*time.Second)
 	defer cancel()
 
-	yesResp, noResp, err := e.orderClient.PlaceOrdersBatch(
+	responses, err := e.orderClient.PlaceOrdersMultiOutcome(
 		ctx,
-		outcome1.TokenID,
-		outcome2.TokenID,
+		outcomeParams,
 		opp.MaxTradeSize,
-		outcome1.AskPrice,
-		outcome2.AskPrice,
-		outcome1.TickSize,
-		outcome1.MinSize,
-		outcome2.TickSize,
-		outcome2.MinSize,
 	)
 
 	if err != nil {
 		// Log detailed error information
-		errorMsg := err.Error()
-		if yesResp != nil && !yesResp.Success {
-			errorMsg = fmt.Sprintf("YES: %s", yesResp.ErrorMsg)
-		}
-		if noResp != nil && !noResp.Success {
-			if yesResp != nil && !yesResp.Success {
-				errorMsg = fmt.Sprintf("YES: %s, NO: %s", yesResp.ErrorMsg, noResp.ErrorMsg)
-			} else {
-				errorMsg = fmt.Sprintf("NO: %s", noResp.ErrorMsg)
-			}
-		}
-
-		e.logger.Error("order-placement-failed",
+		e.logger.Error("multi-outcome-order-placement-failed",
 			zap.String("opportunity-id", opp.ID),
-			zap.String("error-msg", errorMsg),
+			zap.String("market-slug", opp.MarketSlug),
+			zap.Int("outcome-count", len(opp.Outcomes)),
 			zap.Error(err))
 
 		ExecutionErrorsTotal.Inc()
@@ -315,59 +296,50 @@ func (e *Executor) executeLive(opp *arbitrage.Opportunity) *types.ExecutionResul
 		}
 	}
 
-	// Verify both orders succeeded
-	if !yesResp.Success {
-		e.logger.Error("yes-order-failed",
+	// Verify all orders succeeded
+	var failedOutcomes []string
+	for i, resp := range responses {
+		if !resp.Success {
+			failedOutcomes = append(failedOutcomes,
+				fmt.Sprintf("%s: %s", opp.Outcomes[i].Outcome, resp.ErrorMsg))
+		}
+	}
+
+	if len(failedOutcomes) > 0 {
+		errorMsg := strings.Join(failedOutcomes, "; ")
+		e.logger.Error("some-orders-failed",
 			zap.String("opportunity-id", opp.ID),
-			zap.String("error-msg", yesResp.ErrorMsg))
+			zap.String("market-slug", opp.MarketSlug),
+			zap.Strings("failed-outcomes", failedOutcomes))
 		ExecutionErrorsTotal.Inc()
 		return &types.ExecutionResult{
 			OpportunityID: opp.ID,
 			MarketSlug:    opp.MarketSlug,
 			ExecutedAt:    now,
 			Success:       false,
-			Error:         fmt.Errorf("YES order failed: %s", yesResp.ErrorMsg),
+			Error:         fmt.Errorf("order failures: %s", errorMsg),
 		}
 	}
 
-	if !noResp.Success {
-		e.logger.Error("no-order-failed",
-			zap.String("opportunity-id", opp.ID),
-			zap.String("error-msg", noResp.ErrorMsg))
-		ExecutionErrorsTotal.Inc()
-		return &types.ExecutionResult{
-			OpportunityID: opp.ID,
-			MarketSlug:    opp.MarketSlug,
-			ExecutedAt:    now,
-			Success:       false,
-			Error:         fmt.Errorf("NO order failed: %s", noResp.ErrorMsg),
+	// Create trade records for all outcomes
+	trades := make([]*types.Trade, len(opp.Outcomes))
+	for i, outcome := range opp.Outcomes {
+		trades[i] = &types.Trade{
+			Outcome:   outcome.Outcome,
+			Side:      "BUY",
+			Price:     outcome.AskPrice,
+			Size:      opp.MaxTradeSize,
+			Timestamp: now,
 		}
-	}
 
-	// Create trade records using opportunity data
-	// Note: OrderSubmissionResponse doesn't include price/size, so we use the opportunity values
-	trade1 := &types.Trade{
-		Outcome:   outcome1.Outcome,
-		Side:      "BUY",
-		Price:     outcome1.AskPrice,
-		Size:      opp.MaxTradeSize,
-		Timestamp: now,
-	}
-
-	trade2 := &types.Trade{
-		Outcome:   outcome2.Outcome,
-		Side:      "BUY",
-		Price:     outcome2.AskPrice,
-		Size:      opp.MaxTradeSize,
-		Timestamp: now,
+		// Update metrics for each outcome
+		TradesTotal.WithLabelValues("live", outcome.Outcome).Inc()
 	}
 
 	// Calculate realized profit
 	realizedProfit := opp.MaxTradeSize * opp.ProfitMargin
 
 	// Update metrics
-	TradesTotal.WithLabelValues("live", outcome1.Outcome).Inc()
-	TradesTotal.WithLabelValues("live", outcome2.Outcome).Inc()
 	ProfitRealizedUSD.WithLabelValues("live").Add(realizedProfit)
 
 	// Update cumulative profit
@@ -376,29 +348,44 @@ func (e *Executor) executeLive(opp *arbitrage.Opportunity) *types.ExecutionResul
 	cumulativeProfit := e.cumulativeProfit
 	e.mu.Unlock()
 
-	e.logger.Info("live-trade-executed",
-		zap.String("market-slug", opp.MarketSlug),
-		zap.String("order1-id", yesResp.OrderID),
-		zap.String("order1-status", yesResp.Status),
-		zap.String("order2-id", noResp.OrderID),
-		zap.String("order2-status", noResp.Status),
-		zap.Float64("outcome1-price", outcome1.AskPrice),
-		zap.Float64("outcome2-price", outcome2.AskPrice),
-		zap.Float64("size", opp.MaxTradeSize),
-		zap.Int("profit-bps", opp.ProfitBPS),
-		zap.Float64("profit-usd", realizedProfit),
-		zap.Float64("cumulative-profit-usd", cumulativeProfit))
+	// Build log fields for order IDs and statuses
+	orderLogFields := make([]zap.Field, 0, len(responses)*3)
+	for i, resp := range responses {
+		orderLogFields = append(orderLogFields,
+			zap.String(fmt.Sprintf("outcome%d", i+1), opp.Outcomes[i].Outcome),
+			zap.String(fmt.Sprintf("order-id%d", i+1), resp.OrderID),
+			zap.String(fmt.Sprintf("status%d", i+1), resp.Status))
+	}
 
-	return &types.ExecutionResult{
+	e.logger.Info("live-multi-outcome-trade-executed",
+		append([]zap.Field{
+			zap.String("market-slug", opp.MarketSlug),
+			zap.String("question", opp.MarketQuestion),
+			zap.Int("outcome-count", len(opp.Outcomes)),
+			zap.Float64("size", opp.MaxTradeSize),
+			zap.Int("profit-bps", opp.ProfitBPS),
+			zap.Float64("profit-usd", realizedProfit),
+			zap.Float64("cumulative-profit-usd", cumulativeProfit),
+		}, orderLogFields...)...)
+
+	// Create execution result
+	result := &types.ExecutionResult{
 		OpportunityID:  opp.ID,
 		MarketSlug:     opp.MarketSlug,
 		ExecutedAt:     now,
-		YesTrade:       trade1,
-		NoTrade:        trade2,
+		AllTrades:      trades,
 		RealizedProfit: realizedProfit,
 		Success:        true,
 		Error:          nil,
 	}
+
+	// For backward compatibility with binary markets, set YesTrade/NoTrade
+	if len(trades) == 2 {
+		result.YesTrade = trades[0]
+		result.NoTrade = trades[1]
+	}
+
+	return result
 }
 
 // Close gracefully closes the executor.

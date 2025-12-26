@@ -249,37 +249,46 @@ func runPlaceOrders(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Submit orders individually
-	fmt.Printf("=== Submitting YES Order ===\n\n")
+	// Submit orders atomically via batch endpoint
+	fmt.Printf("=== Submitting Batch Orders (YES + NO) ===\n\n")
 
 	ctx3, cancel3 := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel3()
 
-	yesResp, err := submitSingleOrder(ctx3, cfg, yesSignedOrder)
+	responses, err := submitBatchOrders(ctx3, cfg, []*model.SignedOrder{yesSignedOrder, noSignedOrder})
 	if err != nil {
-		fmt.Printf("YES order failed: %v\n\n", err)
-	} else {
-		fmt.Printf("YES order submitted!\n")
-		fmt.Printf("  Success: %v\n", yesResp.Success)
-		fmt.Printf("  Order ID: %s\n", yesResp.OrderID)
-		fmt.Printf("  Status: %s\n", yesResp.Status)
-		fmt.Printf("  Taking Amount: %s\n", yesResp.TakingAmount)
-		fmt.Printf("  Making Amount: %s\n\n", yesResp.MakingAmount)
+		return fmt.Errorf("batch order submission failed: %w", err)
 	}
 
-	fmt.Printf("=== Submitting NO Order ===\n\n")
-
-	noResp, err := submitSingleOrder(ctx3, cfg, noSignedOrder)
-	if err != nil {
-		fmt.Printf("NO order failed: %v\n\n", err)
-	} else {
-		fmt.Printf("NO order submitted!\n")
-		fmt.Printf("  Success: %v\n", noResp.Success)
-		fmt.Printf("  Order ID: %s\n", noResp.OrderID)
-		fmt.Printf("  Status: %s\n", noResp.Status)
-		fmt.Printf("  Taking Amount: %s\n", noResp.TakingAmount)
-		fmt.Printf("  Making Amount: %s\n\n", noResp.MakingAmount)
+	// Check if all orders succeeded
+	allSuccess := true
+	for i, resp := range responses {
+		if !resp.Success {
+			allSuccess = false
+			fmt.Printf("%s order failed: %s\n\n", []string{"YES", "NO"}[i], resp.ErrorMsg)
+		}
 	}
+
+	if !allSuccess {
+		return fmt.Errorf("one or more orders in batch failed")
+	}
+
+	// Display results
+	fmt.Printf("✓ Batch submission successful - both orders placed atomically\n\n")
+
+	fmt.Printf("YES Order:\n")
+	fmt.Printf("  Success: %v\n", responses[0].Success)
+	fmt.Printf("  Order ID: %s\n", responses[0].OrderID)
+	fmt.Printf("  Status: %s\n", responses[0].Status)
+	fmt.Printf("  Taking Amount: %s\n", responses[0].TakingAmount)
+	fmt.Printf("  Making Amount: %s\n\n", responses[0].MakingAmount)
+
+	fmt.Printf("NO Order:\n")
+	fmt.Printf("  Success: %v\n", responses[1].Success)
+	fmt.Printf("  Order ID: %s\n", responses[1].OrderID)
+	fmt.Printf("  Status: %s\n", responses[1].Status)
+	fmt.Printf("  Taking Amount: %s\n", responses[1].TakingAmount)
+	fmt.Printf("  Making Amount: %s\n\n", responses[1].MakingAmount)
 
 	return nil
 }
@@ -481,4 +490,106 @@ func submitSingleOrder(
 	}
 
 	return resp, nil
+}
+
+// submitBatchOrders submits multiple orders atomically via the /orders endpoint
+func submitBatchOrders(
+	ctx context.Context,
+	cfg *PlaceOrdersConfig,
+	orders []*model.SignedOrder,
+) (responses []*types.OrderSubmissionResponse, err error) {
+	// Build array of order requests
+	orderRequests := make([]types.OrderSubmissionRequest, len(orders))
+
+	for i, order := range orders {
+		// Convert Side to string
+		sideStr := "BUY"
+		if order.Side.Uint64() == uint64(model.SELL) {
+			sideStr = "SELL"
+		}
+
+		// Convert to JSON format
+		jsonOrder := types.SignedOrderJSON{
+			Salt:          order.Salt.Int64(),
+			Maker:         order.Maker.Hex(),
+			Signer:        order.Signer.Hex(),
+			Taker:         order.Taker.Hex(),
+			TokenID:       order.TokenId.String(),
+			MakerAmount:   order.MakerAmount.String(),
+			TakerAmount:   order.TakerAmount.String(),
+			Side:          sideStr,
+			Expiration:    order.Expiration.String(),
+			Nonce:         order.Nonce.String(),
+			FeeRateBps:    order.FeeRateBps.String(),
+			SignatureType: int(order.SignatureType.Int64()),
+			Signature:     "0x" + common.Bytes2Hex(order.Signature),
+		}
+
+		orderRequests[i] = types.OrderSubmissionRequest{
+			Order:     jsonOrder,
+			Owner:     cfg.APIKey,
+			OrderType: "GTC",
+		}
+	}
+
+	// Marshal to JSON
+	reqBody, err := json.Marshal(orderRequests)
+	if err != nil {
+		return nil, fmt.Errorf("marshal batch request: %w", err)
+	}
+
+	// Create HMAC signature
+	timestamp := fmt.Sprintf("%d", time.Now().Unix())
+	method := "POST"
+	requestPath := "/orders" // Batch endpoint (plural)
+
+	signaturePayload := timestamp + method + requestPath + string(reqBody)
+
+	// Decode secret using URL-safe base64
+	secretBytes, err := base64.URLEncoding.DecodeString(cfg.Secret)
+	if err != nil {
+		return nil, fmt.Errorf("decode secret: %w", err)
+	}
+
+	h := hmac.New(sha256.New, secretBytes)
+	h.Write([]byte(signaturePayload))
+	signature := base64.URLEncoding.EncodeToString(h.Sum(nil))
+
+	// Make request
+	url := "https://clob.polymarket.com" + requestPath
+	req, err := http.NewRequestWithContext(ctx, method, url, strings.NewReader(string(reqBody)))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("POLY_API_KEY", cfg.APIKey)
+	req.Header.Set("POLY_SIGNATURE", signature)
+	req.Header.Set("POLY_TIMESTAMP", timestamp)
+	req.Header.Set("POLY_PASSPHRASE", cfg.Passphrase)
+	req.Header.Set("POLY_ADDRESS", cfg.Address)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	httpResp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("send request: %w", err)
+	}
+	defer httpResp.Body.Close()
+
+	body, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	if httpResp.StatusCode != http.StatusOK && httpResp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("API error (status %d): %s", httpResp.StatusCode, string(body))
+	}
+
+	// Parse array of responses
+	err = json.Unmarshal(body, &responses)
+	if err != nil {
+		return nil, fmt.Errorf("parse batch response: %w", err)
+	}
+
+	return responses, nil
 }

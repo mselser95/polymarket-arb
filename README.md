@@ -1907,6 +1907,86 @@ Response:
 }
 ```
 
+### Bot API Endpoints
+
+The bot exposes HTTP endpoints for health checks and real-time orderbook data.
+
+**GET /health**
+
+Health check endpoint.
+
+Response:
+```json
+{
+  "status": "ok"
+}
+```
+
+**GET /ready**
+
+Readiness check (returns 200 when bot is fully initialized).
+
+**GET /metrics**
+
+Prometheus metrics endpoint (see [Monitoring & Observability](#monitoring--observability)).
+
+**GET /api/orderbook?slug=<market-slug>**
+
+Get live orderbook data for all outcomes in a subscribed market.
+
+Query parameters:
+- `slug` (string, required): Market slug (e.g., `will-bitcoin-hit-100k`)
+
+Response:
+```json
+{
+  "market_id": "0x1234...",
+  "market_slug": "will-bitcoin-hit-100k",
+  "question": "Will Bitcoin hit $100k in 2025?",
+  "outcomes": [
+    {
+      "outcome": "Yes",
+      "token_id": "86076435890279485031516158085782",
+      "best_bid_price": 0.48,
+      "best_bid_size": 150.0,
+      "best_ask_price": 0.52,
+      "best_ask_size": 120.0
+    },
+    {
+      "outcome": "No",
+      "token_id": "86076435890279485031516158085783",
+      "best_bid_price": 0.47,
+      "best_bid_size": 200.0,
+      "best_ask_price": 0.53,
+      "best_ask_size": 180.0
+    }
+  ]
+}
+```
+
+Error responses:
+- `400`: Missing `slug` parameter
+- `404`: Market not found or not currently subscribed
+
+**Notes:**
+- Only returns data for markets currently subscribed by the bot
+- Multi-outcome markets (elections, sports) return N outcome objects
+- Orderbook data updates in real-time from WebSocket feed
+- Best bid/ask represent top of book only (no depth)
+
+**Example usage:**
+```bash
+# Query binary market
+curl "http://localhost:8080/api/orderbook?slug=will-bitcoin-hit-100k"
+
+# Query multi-outcome market (election)
+curl "http://localhost:8080/api/orderbook?slug=2024-presidential-election"
+
+# Error: market not subscribed
+curl "http://localhost:8080/api/orderbook?slug=nonexistent-market"
+# {"error":"market not found or not subscribed"}
+```
+
 ## Deployment
 
 ### Docker

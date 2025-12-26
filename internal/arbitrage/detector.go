@@ -2,6 +2,7 @@ package arbitrage
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -50,7 +51,7 @@ func New(cfg Config, obManager *orderbook.Manager, discoveryService *discovery.S
 		logger:           cfg.Logger,
 		storage:          storage,
 		metadataClient:   metadataClient,
-		opportunityChan:  make(chan *Opportunity, 50),
+		opportunityChan:  make(chan *Opportunity, 500),
 		obUpdateChan:     obManager.UpdateChan(),
 	}
 }
@@ -267,9 +268,17 @@ func (d *Detector) detectMultiOutcome(
 
 	// Check if arbitrage exists
 	if priceSum >= d.config.Threshold {
+		d.logger.Debug("price-above-threshold",
+			zap.String("market-slug", market.MarketSlug),
+			zap.Float64("price-sum", priceSum),
+			zap.Float64("threshold", d.config.Threshold),
+			zap.Float64("shortfall", priceSum-d.config.Threshold))
 		OpportunitiesRejectedTotal.WithLabelValues("price_above_threshold").Inc()
 		return nil, false
 	}
+
+	// POTENTIAL ARBITRAGE DETECTED - Print detailed analysis before validation
+	d.printArbitrageAnalysis(market, orderbooks, priceSum)
 
 	// Find minimum size across all outcomes (bottleneck for trade size)
 	maxSize := orderbooks[0].BestAskSize
@@ -290,9 +299,11 @@ func (d *Detector) detectMultiOutcome(
 
 	// Check minimum trade size
 	if maxSize < d.config.MinTradeSize {
-		d.logger.Debug("opportunity-below-min-size",
+		d.logger.Info("opportunity-rejected-below-min-size",
 			zap.String("market-slug", market.MarketSlug),
-			zap.Float64("size", maxSize),
+			zap.Float64("price-sum", priceSum),
+			zap.Float64("spread", d.config.Threshold-priceSum),
+			zap.Float64("calculated-size", maxSize),
 			zap.Float64("min-size", d.config.MinTradeSize))
 		OpportunitiesRejectedTotal.WithLabelValues("below_min_size").Inc()
 		return nil, false
@@ -331,11 +342,14 @@ func (d *Detector) detectMultiOutcome(
 
 		// Check if this outcome meets minimum requirements
 		if tokenSize < minSize {
-			d.logger.Debug("opportunity-below-market-minimum",
+			d.logger.Info("opportunity-rejected-below-market-minimum",
 				zap.String("market-slug", market.MarketSlug),
-				zap.Int("outcome-index", i),
+				zap.String("outcome", market.Outcomes[i].Outcome),
+				zap.Float64("price-sum", priceSum),
+				zap.Float64("spread", d.config.Threshold-priceSum),
 				zap.Float64("token-size", tokenSize),
-				zap.Float64("min-size", minSize))
+				zap.Float64("market-min-size", minSize),
+				zap.Float64("required-usd", minSize*book.BestAskPrice))
 			OpportunitiesRejectedTotal.WithLabelValues("below_market_min").Inc()
 			return nil, false
 		}
@@ -375,11 +389,15 @@ func (d *Detector) detectMultiOutcome(
 
 	// Check if net profit is positive after fees
 	if opp.NetProfit <= 0 {
-		d.logger.Debug("opportunity-has-negative-profit-after-fees",
+		d.logger.Info("opportunity-rejected-negative-profit-after-fees",
 			zap.String("market-slug", market.MarketSlug),
+			zap.Float64("price-sum", opp.TotalPriceSum),
+			zap.Float64("spread", d.config.Threshold-opp.TotalPriceSum),
+			zap.Float64("trade-size", opp.MaxTradeSize),
 			zap.Float64("gross-profit", opp.EstimatedProfit),
 			zap.Float64("total-fees", opp.TotalFees),
-			zap.Float64("net-profit", opp.NetProfit))
+			zap.Float64("net-profit", opp.NetProfit),
+			zap.Float64("taker-fee-rate", d.config.TakerFee))
 		OpportunitiesRejectedTotal.WithLabelValues("negative_profit_after_fees").Inc()
 		return nil, false
 	}
@@ -404,4 +422,123 @@ func (d *Detector) Close() error {
 	d.wg.Wait()
 	d.logger.Info("arbitrage-detector-closed")
 	return nil
+}
+
+// printArbitrageAnalysis prints detailed components of potential arbitrage to console.
+func (d *Detector) printArbitrageAnalysis(
+	market *types.MarketSubscription,
+	orderbooks []*types.OrderbookSnapshot,
+	priceSum float64,
+) {
+	fmt.Println("\n" + "┌────────────────────────────────────────────────────────────────────────────┐")
+	fmt.Printf("│ POTENTIAL ARBITRAGE: %s\n", market.MarketSlug)
+	fmt.Println("└────────────────────────────────────────────────────────────────────────────┘")
+	fmt.Printf("  Question: %s\n", market.Question)
+	fmt.Printf("  Market ID: %s\n", market.MarketID)
+	fmt.Println()
+
+	// Print all outcomes with prices and sizes
+	fmt.Println("  OUTCOMES:")
+	for i, book := range orderbooks {
+		outcome := market.Outcomes[i].Outcome
+		fmt.Printf("    [%d] %-15s Ask: $%.4f × %.2f tokens\n",
+			i+1, outcome, book.BestAskPrice, book.BestAskSize)
+	}
+	fmt.Println()
+
+	// Calculate spread and potential profit
+	spread := d.config.Threshold - priceSum
+	spreadBPS := spread * 10000
+
+	fmt.Println("  PRICE ANALYSIS:")
+	fmt.Printf("    Sum of Ask Prices:  %.6f\n", priceSum)
+	fmt.Printf("    Threshold:          %.6f\n", d.config.Threshold)
+	fmt.Printf("    Spread:             %.6f (%.0f bps)\n", spread, spreadBPS)
+	fmt.Println()
+
+	// Find minimum available size
+	minSize := orderbooks[0].BestAskSize
+	bottleneckOutcome := market.Outcomes[0].Outcome
+	for i, book := range orderbooks {
+		if book.BestAskSize < minSize {
+			minSize = book.BestAskSize
+			bottleneckOutcome = market.Outcomes[i].Outcome
+		}
+	}
+
+	// Calculate trade sizes for each outcome
+	fmt.Println("  SIZE ANALYSIS:")
+	fmt.Printf("    Available Sizes:\n")
+	for i, book := range orderbooks {
+		usdValue := book.BestAskSize * book.BestAskPrice
+		fmt.Printf("      %-15s %.2f tokens = $%.2f\n",
+			market.Outcomes[i].Outcome+":", book.BestAskSize, usdValue)
+	}
+	fmt.Printf("    Bottleneck:         %s (%.2f tokens)\n", bottleneckOutcome, minSize)
+	fmt.Printf("    Max Trade Size:     $%.2f (before caps)\n", minSize)
+	fmt.Println()
+
+	// Apply size caps
+	cappedSize := minSize
+	if cappedSize > d.config.MaxTradeSize {
+		fmt.Printf("    ⚠ Capped by MAX:    $%.2f → $%.2f\n", cappedSize, d.config.MaxTradeSize)
+		cappedSize = d.config.MaxTradeSize
+	}
+
+	// Check minimum
+	meetsMin := cappedSize >= d.config.MinTradeSize
+	fmt.Printf("    Min Trade Size:     $%.2f %s\n",
+		d.config.MinTradeSize,
+		map[bool]string{true: "✓", false: "✗ FAILS"}[meetsMin])
+	fmt.Printf("    Final Trade Size:   $%.2f\n", cappedSize)
+	fmt.Println()
+
+	// Calculate gross profit and fees
+	grossProfit := cappedSize * spread
+	feesPerOutcome := cappedSize * d.config.TakerFee
+	totalFees := feesPerOutcome * float64(len(orderbooks))
+	netProfit := grossProfit - totalFees
+
+	fmt.Println("  PROFIT ANALYSIS:")
+	fmt.Printf("    Gross Profit:       $%.4f (%.0f bps)\n", grossProfit, spreadBPS)
+	fmt.Printf("    Taker Fee Rate:     %.2f%% per outcome\n", d.config.TakerFee*100)
+	fmt.Printf("    Fees (%d outcomes):  $%.4f ($%.4f × %d)\n",
+		len(orderbooks), totalFees, feesPerOutcome, len(orderbooks))
+	fmt.Printf("    Net Profit:         $%.4f ", netProfit)
+	if netProfit > 0 {
+		netBPS := (netProfit / cappedSize) * 10000
+		fmt.Printf("(%.0f bps) ✓\n", netBPS)
+	} else {
+		fmt.Printf("✗ UNPROFITABLE\n")
+	}
+	fmt.Println()
+
+	// Check market minimums (estimate)
+	fmt.Println("  MARKET MINIMUM CHECK:")
+	for i, book := range orderbooks {
+		// Use default minimum of 5 tokens as example
+		minTokens := 5.0
+		tokenAmount := cappedSize / book.BestAskPrice
+		requiredUSD := minTokens * book.BestAskPrice
+		meetsMarketMin := tokenAmount >= minTokens
+
+		fmt.Printf("    %-15s %.2f tokens %s (min: %.0f, need: $%.2f)\n",
+			market.Outcomes[i].Outcome+":",
+			tokenAmount,
+			map[bool]string{true: "✓", false: "✗"}[meetsMarketMin],
+			minTokens,
+			requiredUSD)
+	}
+	fmt.Println()
+
+	// Print validation status
+	fmt.Println("  VALIDATION:")
+	fmt.Printf("    Price Check:        %s (sum < threshold)\n",
+		map[bool]string{true: "✓ PASS", false: "✗ FAIL"}[priceSum < d.config.Threshold])
+	fmt.Printf("    Size Check:         %s (size >= min)\n",
+		map[bool]string{true: "✓ PASS", false: "✗ FAIL"}[cappedSize >= d.config.MinTradeSize])
+	fmt.Printf("    Profit Check:       %s (net profit > 0)\n",
+		map[bool]string{true: "✓ PASS", false: "✗ FAIL"}[netProfit > 0])
+
+	fmt.Println("─────────────────────────────────────────────────────────────────────────────")
 }

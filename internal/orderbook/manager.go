@@ -35,7 +35,7 @@ func New(cfg *Config) *Manager {
 		books:      make(map[string]*types.OrderbookSnapshot),
 		logger:     cfg.Logger,
 		msgChan:    cfg.MessageChannel,
-		updateChan: make(chan *types.OrderbookSnapshot, 1000), // Buffer for high update rate
+		updateChan: make(chan *types.OrderbookSnapshot, 10000), // Buffer for high update rate
 	}
 }
 
@@ -177,11 +177,10 @@ func (m *Manager) handlePriceChangeMessage(msg *types.OrderbookMessage) error {
 	lockStart := time.Now()
 	m.mu.Lock()
 	LockContentionDuration.Observe(time.Since(lockStart).Seconds())
-	defer m.mu.Unlock()
 
 	snapshot, exists := m.books[msg.AssetID]
 	if !exists {
-		// No existing snapshot, treat as full book
+		// No existing snapshot, unlock and treat as full book
 		m.mu.Unlock()
 		return m.handleBookMessage(msg)
 	}
@@ -189,15 +188,26 @@ func (m *Manager) handlePriceChangeMessage(msg *types.OrderbookMessage) error {
 	// Update snapshot with pre-parsed values
 	if hasBid {
 		snapshot.BestBidPrice = bestBidPrice
-		snapshot.BestBidSize = bestBidSize
+		// Only update size if it's valid (> 0)
+		// price_change messages have size="0", so we preserve existing size
+		if bestBidSize > 0 {
+			snapshot.BestBidSize = bestBidSize
+		}
 	}
 
 	if hasAsk {
 		snapshot.BestAskPrice = bestAskPrice
-		snapshot.BestAskSize = bestAskSize
+		// Only update size if it's valid (> 0)
+		// price_change messages have size="0", so we preserve existing size
+		if bestAskSize > 0 {
+			snapshot.BestAskSize = bestAskSize
+		}
 	}
 
 	snapshot.LastUpdated = time.Now()
+
+	// Unlock before logging and channel sends
+	m.mu.Unlock()
 
 	m.logger.Debug("orderbook-price-updated",
 		zap.String("token-id", msg.AssetID),

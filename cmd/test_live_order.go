@@ -162,8 +162,7 @@ func runTestLiveOrder(cmd *cobra.Command, args []string) error {
 	fmt.Printf("YES Token: %s\n", yesToken.TokenID)
 	fmt.Printf("NO Token: %s\n\n", noToken.TokenID)
 
-	// Submit YES order
-	fmt.Printf("=== Submitting YES Order ===\n")
+	// Build both orders
 	yesOrderReq := OrderRequest{
 		TokenID:   yesToken.TokenID,
 		Price:     fmt.Sprintf("%.4f", yesPrice),
@@ -172,32 +171,6 @@ func runTestLiveOrder(cmd *cobra.Command, args []string) error {
 		OrderType: "GTC", // Good Till Cancelled
 	}
 
-	var yesResp *types.OrderSubmissionResponse
-	if paperMode {
-		yesResp = simulatePaperOrder(yesOrderReq, market.ID, "YES")
-		displayOrderResponse("YES", yesResp, true)
-	} else if mockMode {
-		yesResp, err = loadMockResponse(mockResponseFile)
-		if err != nil {
-			fmt.Printf("Failed to load mock response: %v\n\n", err)
-		} else {
-			displayOrderResponse("YES", yesResp, false)
-		}
-	} else {
-		yesResp, err = submitLiveOrder(ctx, yesOrderReq, market.ID)
-		if err != nil {
-			fmt.Printf("YES order failed: %v\n\n", err)
-			// Save error response for future testing
-			saveResponseToFile("test_responses/last_error_yes.json", err.Error())
-		} else {
-			displayOrderResponse("YES", yesResp, false)
-			// Save successful response for future testing
-			saveOrderResponse("test_responses/last_success_yes.json", yesResp)
-		}
-	}
-
-	// Submit NO order
-	fmt.Printf("=== Submitting NO Order ===\n")
 	noOrderReq := OrderRequest{
 		TokenID:   noToken.TokenID,
 		Price:     fmt.Sprintf("%.4f", noPrice),
@@ -206,11 +179,23 @@ func runTestLiveOrder(cmd *cobra.Command, args []string) error {
 		OrderType: "GTC",
 	}
 
-	var noResp *types.OrderSubmissionResponse
+	// Submit orders
+	var yesResp, noResp *types.OrderSubmissionResponse
+
 	if paperMode {
+		fmt.Printf("=== Simulating Batch Orders (YES + NO) ===\n")
+		yesResp = simulatePaperOrder(yesOrderReq, market.ID, "YES")
 		noResp = simulatePaperOrder(noOrderReq, market.ID, "NO")
+		displayOrderResponse("YES", yesResp, true)
 		displayOrderResponse("NO", noResp, true)
 	} else if mockMode {
+		fmt.Printf("=== Using Mock Responses ===\n")
+		yesResp, err = loadMockResponse(mockResponseFile)
+		if err != nil {
+			fmt.Printf("Failed to load mock response: %v\n\n", err)
+		} else {
+			displayOrderResponse("YES", yesResp, false)
+		}
 		noResp, err = loadMockResponse(mockResponseFile)
 		if err != nil {
 			fmt.Printf("Failed to load mock response: %v\n\n", err)
@@ -218,16 +203,44 @@ func runTestLiveOrder(cmd *cobra.Command, args []string) error {
 			displayOrderResponse("NO", noResp, false)
 		}
 	} else {
-		noResp, err = submitLiveOrder(ctx, noOrderReq, market.ID)
+		fmt.Printf("=== Submitting Batch Orders (YES + NO) ===\n")
+		fmt.Printf("Using atomic batch submission to /orders endpoint\n\n")
+
+		responses, err := submitBatchLiveOrders(ctx, []OrderRequest{yesOrderReq, noOrderReq}, market.ID)
 		if err != nil {
-			fmt.Printf("NO order failed: %v\n\n", err)
-			// Save error response for future testing
-			saveResponseToFile("test_responses/last_error_no.json", err.Error())
-		} else {
-			displayOrderResponse("NO", noResp, false)
-			// Save successful response for future testing
-			saveOrderResponse("test_responses/last_success_no.json", noResp)
+			fmt.Printf("Batch order submission failed: %v\n\n", err)
+			saveResponseToFile("test_responses/last_error_batch.json", err.Error())
+			return fmt.Errorf("batch submission failed: %w", err)
 		}
+
+		// Check responses
+		if len(responses) < 2 {
+			return fmt.Errorf("expected 2 responses, got %d", len(responses))
+		}
+
+		yesResp = responses[0]
+		noResp = responses[1]
+
+		// Verify both succeeded
+		if !yesResp.Success || !noResp.Success {
+			fmt.Printf("One or more orders failed:\n")
+			if !yesResp.Success {
+				fmt.Printf("  YES order: %s\n", yesResp.ErrorMsg)
+			}
+			if !noResp.Success {
+				fmt.Printf("  NO order: %s\n", noResp.ErrorMsg)
+			}
+			fmt.Println()
+			return fmt.Errorf("batch order execution failed")
+		}
+
+		fmt.Printf("✓ Batch submission successful - both orders placed atomically\n\n")
+		displayOrderResponse("YES", yesResp, false)
+		displayOrderResponse("NO", noResp, false)
+
+		// Save successful responses
+		saveOrderResponse("test_responses/last_success_yes.json", yesResp)
+		saveOrderResponse("test_responses/last_success_no.json", noResp)
 	}
 
 	fmt.Printf("\n=== Test Complete ===\n")
@@ -386,6 +399,119 @@ func submitLiveOrder(
 	}
 
 	return resp, nil
+}
+
+// submitBatchLiveOrders submits multiple orders atomically via the /orders batch endpoint
+func submitBatchLiveOrders(
+	ctx context.Context,
+	orders []OrderRequest,
+	marketID string,
+) (responses []*types.OrderSubmissionResponse, err error) {
+	// Load config from environment
+	cfg, err := loadConfig()
+	if err != nil {
+		err = fmt.Errorf("load config: %w", err)
+		return nil, err
+	}
+
+	// Polymarket CLOB API batch endpoint (plural)
+	clobURL := "https://clob.polymarket.com/orders"
+
+	// Marshal batch order request (array of orders)
+	orderJSON, err := json.Marshal(orders)
+	if err != nil {
+		err = fmt.Errorf("marshal batch orders: %w", err)
+		return nil, err
+	}
+
+	// Create timestamp (Unix SECONDS, not milliseconds!)
+	timestamp := fmt.Sprintf("%d", time.Now().Unix())
+
+	// Decode base64 secret (try base64url first, then standard base64)
+	secretBytes, err := base64.URLEncoding.DecodeString(cfg.Secret)
+	if err != nil {
+		// Try standard base64 encoding
+		secretBytes, err = base64.StdEncoding.DecodeString(cfg.Secret)
+		if err != nil {
+			err = fmt.Errorf("decode secret: %w", err)
+			return nil, err
+		}
+	}
+
+	// Create HMAC signature for batch endpoint
+	// Format: timestamp + method + requestPath + body
+	signaturePayload := timestamp + "POST" + "/orders" + string(orderJSON)
+	signature := createHMACSignature(signaturePayload, secretBytes)
+
+	// Create HTTP request
+	req, err := http.NewRequestWithContext(ctx, "POST", clobURL, bytes.NewBuffer(orderJSON))
+	if err != nil {
+		err = fmt.Errorf("create request: %w", err)
+		return nil, err
+	}
+
+	// Add L2 authentication headers
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("POLY_API_KEY", cfg.APIKey)
+	req.Header.Set("POLY_SIGNATURE", signature)
+	req.Header.Set("POLY_TIMESTAMP", timestamp)
+	req.Header.Set("POLY_PASSPHRASE", cfg.Passphrase)
+
+	// Address is required
+	if cfg.Address != "" {
+		req.Header.Set("POLY_ADDRESS", cfg.Address)
+	}
+
+	// Send request
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	httpResp, err := httpClient.Do(req)
+	if err != nil {
+		err = fmt.Errorf("send request: %w", err)
+		return nil, err
+	}
+	defer httpResp.Body.Close()
+
+	// Read response body
+	body, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		err = fmt.Errorf("read response: %w", err)
+		return nil, err
+	}
+
+	// Log full request details for debugging
+	fmt.Printf("\nDebug - Batch Request Details:\n")
+	fmt.Printf("  URL: %s\n", clobURL)
+	fmt.Printf("  Method: POST\n")
+	fmt.Printf("  API Key: %s\n", cfg.APIKey)
+	fmt.Printf("  Address: %s\n", cfg.Address)
+	fmt.Printf("  Timestamp: %s\n", timestamp)
+	fmt.Printf("  Signature: %s\n", signature)
+	fmt.Printf("  Request Body: %s\n", string(orderJSON))
+
+	// Check status code
+	fmt.Printf("\nDebug - Batch Response:\n")
+	fmt.Printf("  Status Code: %d\n", httpResp.StatusCode)
+	fmt.Printf("  Response Body: %s\n\n", string(body))
+
+	if httpResp.StatusCode != http.StatusOK && httpResp.StatusCode != http.StatusCreated {
+		// Try to parse error response
+		var errResp ErrorResponse
+		if json.Unmarshal(body, &errResp) == nil {
+			err = fmt.Errorf("API error (status %d): %s - %s", httpResp.StatusCode, errResp.Error, errResp.Message)
+			return nil, err
+		}
+		err = fmt.Errorf("API error (status %d): %s", httpResp.StatusCode, string(body))
+		return nil, err
+	}
+
+	// Parse batch success response (array of responses)
+	err = json.Unmarshal(body, &responses)
+	if err != nil {
+		err = fmt.Errorf("parse batch response: %w\nBody: %s", err, string(body))
+		return nil, err
+	}
+
+	return responses, nil
 }
 
 func loadConfig() (*Config, error) {

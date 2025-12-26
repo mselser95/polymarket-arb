@@ -46,7 +46,7 @@ func New(cfg *Config) *Service {
 		maxMarketDuration: cfg.MaxMarketDuration,
 		logger:            cfg.Logger,
 		subscribed:        make(map[string]*types.MarketSubscription),
-		newMarketsCh:      make(chan *types.Market, 100),
+		newMarketsCh:      make(chan *types.Market, 5000),
 		singleMarket:      cfg.SingleMarket,
 	}
 }
@@ -107,6 +107,8 @@ func (s *Service) poll(ctx context.Context) error {
 	newMarkets := s.identifyNewMarkets(resp.Data)
 
 	// Cache and send new markets to channel (non-blocking)
+	sentCount := 0
+	droppedCount := 0
 	for i := range newMarkets {
 		// Cache the market
 		s.cacheMarket(newMarkets[i])
@@ -114,18 +116,22 @@ func (s *Service) poll(ctx context.Context) error {
 		select {
 		case s.newMarketsCh <- newMarkets[i]:
 			NewMarketsTotal.Inc()
-			s.logger.Info("new-market-discovered",
+			sentCount++
+			s.logger.Debug("new-market-discovered",
 				zap.String("market-id", newMarkets[i].ID),
 				zap.String("question", newMarkets[i].Question))
 		default:
+			droppedCount++
 			s.logger.Warn("new-markets-channel-full",
 				zap.String("market-id", newMarkets[i].ID))
 		}
 	}
 
-	s.logger.Debug("poll-complete",
+	s.logger.Info("poll-complete",
 		zap.Int("total-markets", len(resp.Data)),
 		zap.Int("new-markets", len(newMarkets)),
+		zap.Int("sent-to-channel", sentCount),
+		zap.Int("dropped", droppedCount),
 		zap.Duration("duration", time.Since(start)))
 
 	return nil
@@ -283,6 +289,15 @@ func (s *Service) GetSubscribedMarkets() []*types.MarketSubscription {
 	}
 
 	return subs
+}
+
+// GetMarketBySlug retrieves a market subscription by its slug.
+func (s *Service) GetMarketBySlug(slug string) (*types.MarketSubscription, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	sub, exists := s.subscribed[slug]
+	return sub, exists
 }
 
 // cacheMarket stores a market in the cache.

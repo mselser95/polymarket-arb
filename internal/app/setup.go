@@ -34,7 +34,6 @@ func New(cfg *config.Config, logger *zap.Logger, opts *Options) (*App, error) {
 
 	// Initialize components
 	healthChecker := setupHealthChecker()
-	httpServer := setupHTTPServer(cfg, logger, healthChecker)
 
 	// Setup cache
 	marketCache, err := setupCache(logger)
@@ -46,6 +45,9 @@ func New(cfg *config.Config, logger *zap.Logger, opts *Options) (*App, error) {
 	discoveryService := setupDiscoveryService(cfg, logger, marketCache, opts)
 	wsPool := setupWebSocketPool(cfg, logger)
 	obManager := setupOrderbookManager(logger, wsPool)
+
+	// Setup HTTP server (needs orderbook manager and discovery service)
+	httpServer := setupHTTPServer(cfg, logger, healthChecker, obManager, discoveryService)
 
 	// Setup storage
 	arbStorage, err := setupStorage(cfg, logger)
@@ -84,11 +86,19 @@ func setupHealthChecker() *healthprobe.HealthChecker {
 	return healthprobe.New()
 }
 
-func setupHTTPServer(cfg *config.Config, logger *zap.Logger, healthChecker *healthprobe.HealthChecker) *httpserver.Server {
+func setupHTTPServer(
+	cfg *config.Config,
+	logger *zap.Logger,
+	healthChecker *healthprobe.HealthChecker,
+	obManager *orderbook.Manager,
+	discoveryService *discovery.Service,
+) *httpserver.Server {
 	return httpserver.New(&httpserver.Config{
-		Port:          cfg.HTTPPort,
-		Logger:        logger,
-		HealthChecker: healthChecker,
+		Port:             cfg.HTTPPort,
+		Logger:           logger,
+		HealthChecker:    healthChecker,
+		OrderbookManager: obManager,
+		DiscoveryService: discoveryService,
 	})
 }
 

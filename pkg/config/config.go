@@ -30,7 +30,7 @@ type Config struct {
 	CleanupInterval time.Duration // How often cleanup command checks for stale markets
 
 	// WebSocket
-	WSPoolSize              int // Number of WebSocket connections (default: 5)
+	WSPoolSize              int // Number of WebSocket connections (default: 20)
 	WSDialTimeout           time.Duration
 	WSPongTimeout           time.Duration
 	WSPingInterval          time.Duration
@@ -91,14 +91,14 @@ func LoadFromEnv() (*Config, error) {
 		CleanupInterval: getDurationOrDefault("CLEANUP_CHECK_INTERVAL", 5*time.Minute),
 
 		// WebSocket defaults
-		WSPoolSize:              getIntOrDefault("WS_POOL_SIZE", 5),
+		WSPoolSize:              getIntOrDefault("WS_POOL_SIZE", 20),
 		WSDialTimeout:           getDurationOrDefault("WS_DIAL_TIMEOUT", 10*time.Second),
 		WSPongTimeout:           getDurationOrDefault("WS_PONG_TIMEOUT", 15*time.Second),
 		WSPingInterval:          getDurationOrDefault("WS_PING_INTERVAL", 10*time.Second),
 		WSReconnectInitialDelay: getDurationOrDefault("WS_RECONNECT_INITIAL_DELAY", 1*time.Second),
 		WSReconnectMaxDelay:     getDurationOrDefault("WS_RECONNECT_MAX_DELAY", 30*time.Second),
 		WSReconnectBackoffMult:  getFloat64OrDefault("WS_RECONNECT_BACKOFF_MULTIPLIER", 2.0),
-		WSMessageBufferSize:     getIntOrDefault("WS_MESSAGE_BUFFER_SIZE", 1000),
+		WSMessageBufferSize:     getIntOrDefault("WS_MESSAGE_BUFFER_SIZE", 10000),
 
 		// Arbitrage defaults
 		ArbThreshold:         getFloat64OrDefault("ARB_THRESHOLD", 0.995),

@@ -8,6 +8,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/mselser95/polymarket-arb/internal/discovery"
+	"github.com/mselser95/polymarket-arb/internal/orderbook"
 	"github.com/mselser95/polymarket-arb/pkg/healthprobe"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
@@ -22,9 +24,11 @@ type Server struct {
 
 // Config holds server configuration.
 type Config struct {
-	Port          string
-	Logger        *zap.Logger
-	HealthChecker *healthprobe.HealthChecker
+	Port             string
+	Logger           *zap.Logger
+	HealthChecker    *healthprobe.HealthChecker
+	OrderbookManager *orderbook.Manager
+	DiscoveryService *discovery.Service
 }
 
 // New creates a new HTTP server.
@@ -41,6 +45,12 @@ func New(cfg *Config) *Server {
 	r.Get("/metrics", promhttp.Handler().ServeHTTP)
 	r.Get("/health", cfg.HealthChecker.Health())
 	r.Get("/ready", cfg.HealthChecker.Ready())
+
+	// Orderbook API endpoint (if components provided)
+	if cfg.OrderbookManager != nil && cfg.DiscoveryService != nil {
+		obHandler := NewOrderbookHandler(cfg.OrderbookManager, cfg.DiscoveryService, cfg.Logger)
+		r.Get("/api/orderbook", obHandler.HandleOrderbook)
+	}
 
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,

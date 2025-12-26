@@ -33,7 +33,7 @@
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
       "targets": [
         {
-          "expr": "rate(polymarket_arb_opportunities_detected_total[1m])",
+          "expr": "rate(polymarket_arb_opportunities_detected_total{service=\"arb-bot\"}[1m])",
           "legendFormat": "Opportunities/sec",
           "refId": "A"
         }
@@ -52,7 +52,7 @@
       "gridPos": {"h": 8, "w": 6, "x": 12, "y": 0},
       "targets": [
         {
-          "expr": "rate(polymarket_execution_opportunities_executed_total[5m]) / rate(polymarket_execution_opportunities_received_total[5m])",
+          "expr": "rate(polymarket_execution_opportunities_executed_total{service=\"arb-bot\"}[5m]) / rate(polymarket_execution_opportunities_received_total{service=\"arb-bot\"}[5m])",
           "refId": "A"
         }
       ],
@@ -102,7 +102,7 @@
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
       "targets": [
         {
-          "expr": "rate(polymarket_arb_opportunity_profit_bps_bucket[1m])",
+          "expr": "rate(polymarket_arb_opportunity_profit_bps_bucket{service=\"arb-bot\"}[1m])",
           "format": "heatmap",
           "legendFormat": "{{le}}",
           "refId": "A"
@@ -133,7 +133,7 @@
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
       "targets": [
         {
-          "expr": "rate(polymarket_arb_net_profit_bps_bucket[1m])",
+          "expr": "rate(polymarket_arb_net_profit_bps_bucket{service=\"arb-bot\"}[1m])",
           "format": "heatmap",
           "legendFormat": "{{le}}",
           "refId": "A"
@@ -155,7 +155,7 @@
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
       "targets": [
         {
-          "expr": "polymarket_arb_opportunity_size_usd_bucket",
+          "expr": "polymarket_arb_opportunity_size_usd_bucket{service=\"arb-bot\"}",
           "format": "heatmap",
           "refId": "A"
         }
@@ -173,7 +173,7 @@
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
       "targets": [
         {
-          "expr": "sum by(reason) (polymarket_arb_opportunities_rejected_total)",
+          "expr": "sum by(reason) (polymarket_arb_opportunities_rejected_total{service=\"arb-bot\"})",
           "legendFormat": "{{reason}}",
           "refId": "A"
         }
@@ -219,7 +219,7 @@
       "gridPos": {"h": 4, "w": 6, "x": 12, "y": 24},
       "targets": [
         {
-          "expr": "count(count by(market_slug) (polymarket_arb_opportunities_detected_total))",
+          "expr": "count(count by(market_slug) (polymarket_arb_opportunities_detected_total{service=\"arb-bot\"}))",
           "refId": "A"
         }
       ],
@@ -244,7 +244,7 @@
       "gridPos": {"h": 4, "w": 6, "x": 18, "y": 24},
       "targets": [
         {
-          "expr": "polymarket_execution_opportunities_executed_total / polymarket_arb_opportunities_detected_total",
+          "expr": "polymarket_execution_opportunities_executed_total{service=\"arb-bot\"} / polymarket_arb_opportunities_detected_total{service=\"arb-bot\"}",
           "refId": "A"
         }
       ],

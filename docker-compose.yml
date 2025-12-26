@@ -196,11 +196,11 @@ services:
     deploy:
       resources:
         limits:
+          cpus: '2.0'
+          memory: 1024M
+        reservations:
           cpus: '1.0'
           memory: 512M
-        reservations:
-          cpus: '0.5'
-          memory: 256M
 
 # ✅ NAMED VOLUMES: Ensure data persistence across container restarts
 volumes:

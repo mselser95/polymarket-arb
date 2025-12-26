@@ -82,112 +82,6 @@ func NewOrderClient(cfg *OrderClientConfig) (*OrderClient, error) {
 	}, nil
 }
 
-// PlaceOrders places YES and NO orders for arbitrage (legacy sequential method).
-// DEPRECATED: Use PlaceOrdersBatch for better atomicity and performance.
-func (c *OrderClient) PlaceOrders(
-	ctx context.Context,
-	yesTokenID string,
-	noTokenID string,
-	size float64,
-	yesPrice float64,
-	noPrice float64,
-	yesTickSize float64,
-	yesMinSize float64,
-	noTickSize float64,
-	noMinSize float64,
-) (yesResp *types.OrderSubmissionResponse, noResp *types.OrderSubmissionResponse, err error) {
-	// Determine maker address
-	makerAddress := c.address
-	signerAddress := c.address
-	if c.proxyAddress != "" {
-		makerAddress = c.proxyAddress
-	}
-
-	// Get rounding precision for each token
-	yesSizePrecision, yesAmountPrecision := getRoundingConfig(yesTickSize)
-	noSizePrecision, noAmountPrecision := getRoundingConfig(noTickSize)
-
-	// Calculate token sizes with rounding
-	yesTakerTokens := roundAmount(size/yesPrice, yesSizePrecision)
-	noTakerTokens := roundAmount(size/noPrice, noSizePrecision)
-
-	// Validate against minimums
-	if yesTakerTokens < yesMinSize {
-		return nil, nil, fmt.Errorf("YES order size %.2f below minimum %.2f tokens", yesTakerTokens, yesMinSize)
-	}
-	if noTakerTokens < noMinSize {
-		return nil, nil, fmt.Errorf("NO order size %.2f below minimum %.2f tokens", noTakerTokens, noMinSize)
-	}
-
-	// Build YES order with rounded amounts
-	yesMakerUSD := roundAmount(yesTakerTokens*yesPrice, yesAmountPrecision)
-	yesMakerAmount := usdToRawAmount(yesMakerUSD)
-	yesTakerAmount := usdToRawAmount(yesTakerTokens)
-
-	yesOrderData := &model.OrderData{
-		Maker:         makerAddress,
-		Taker:         "0x0000000000000000000000000000000000000000",
-		TokenId:       yesTokenID,
-		MakerAmount:   yesMakerAmount,
-		TakerAmount:   yesTakerAmount,
-		Side:          model.BUY, // BUY = 0, buying outcome tokens with USDC
-		FeeRateBps:    "0",
-		Nonce:         "0",
-		Signer:        signerAddress,
-		Expiration:    "0",
-		SignatureType: c.signatureType,
-	}
-
-	yesSignedOrder, err := c.orderBuilder.BuildSignedOrder(c.privateKey, yesOrderData, model.CTFExchange)
-	if err != nil {
-		return nil, nil, fmt.Errorf("build YES order: %w", err)
-	}
-
-	// Build NO order with rounded amounts
-	noMakerUSD := roundAmount(noTakerTokens*noPrice, noAmountPrecision)
-	noMakerAmount := usdToRawAmount(noMakerUSD)
-	noTakerAmount := usdToRawAmount(noTakerTokens)
-
-	noOrderData := &model.OrderData{
-		Maker:         makerAddress,
-		Taker:         "0x0000000000000000000000000000000000000000",
-		TokenId:       noTokenID,
-		MakerAmount:   noMakerAmount,
-		TakerAmount:   noTakerAmount,
-		Side:          model.BUY, // BUY = 0, buying outcome tokens with USDC
-		FeeRateBps:    "0",
-		Nonce:         "0",
-		Signer:        signerAddress,
-		Expiration:    "0",
-		SignatureType: c.signatureType,
-	}
-
-	noSignedOrder, err := c.orderBuilder.BuildSignedOrder(c.privateKey, noOrderData, model.CTFExchange)
-	if err != nil {
-		return nil, nil, fmt.Errorf("build NO order: %w", err)
-	}
-
-	c.logger.Info("orders-built",
-		zap.String("maker", makerAddress),
-		zap.String("signer", signerAddress),
-		zap.Float64("size", size))
-
-	// Submit orders
-	yesResp, err = c.submitOrder(ctx, yesSignedOrder)
-	if err != nil {
-		err = fmt.Errorf("submit YES order: %w", err)
-		return yesResp, noResp, err
-	}
-
-	noResp, err = c.submitOrder(ctx, noSignedOrder)
-	if err != nil {
-		err = fmt.Errorf("submit NO order: %w", err)
-		return yesResp, noResp, err
-	}
-
-	return yesResp, noResp, nil
-}
-
 // GetMakerAddress returns the maker address (proxy if set, otherwise EOA).
 func (c *OrderClient) GetMakerAddress() (makerAddress string) {
 	if c.proxyAddress != "" {
@@ -240,7 +134,9 @@ func (c *OrderClient) PlaceSingleOrder(
 }
 
 // PlaceOrdersBatch places YES and NO orders atomically using the batch endpoint.
-// This is the preferred method as it submits both orders in a single API call.
+// This method is for explicit binary-only usage (2 outcomes: YES and NO tokens).
+// For multi-outcome markets (3+ outcomes), use PlaceOrdersMultiOutcome instead.
+// Both orders are submitted in a single API call for atomic execution.
 func (c *OrderClient) PlaceOrdersBatch(
 	ctx context.Context,
 	yesTokenID string,
@@ -379,6 +275,123 @@ func (c *OrderClient) PlaceOrdersBatch(
 	}
 
 	return yesResp, noResp, nil
+}
+
+// OutcomeOrderParams holds parameters for a single outcome order
+type OutcomeOrderParams struct {
+	TokenID  string
+	Price    float64
+	TickSize float64
+	MinSize  float64
+}
+
+// PlaceOrdersMultiOutcome places orders for N outcomes atomically using the batch endpoint.
+// This method supports binary (2 outcomes) and multi-outcome (3+) markets.
+// All orders are submitted in a single API call for atomic execution.
+func (c *OrderClient) PlaceOrdersMultiOutcome(
+	ctx context.Context,
+	outcomes []OutcomeOrderParams,
+	size float64,
+) (responses []*types.OrderSubmissionResponse, err error) {
+	if len(outcomes) < 2 {
+		return nil, fmt.Errorf("at least 2 outcomes required, got %d", len(outcomes))
+	}
+
+	// Determine maker address
+	makerAddress := c.address
+	signerAddress := c.address
+	if c.proxyAddress != "" {
+		makerAddress = c.proxyAddress
+	}
+
+	// Build signed orders for each outcome
+	batchReq := make(types.BatchOrderRequest, 0, len(outcomes))
+
+	for i, outcome := range outcomes {
+		// Get rounding precision
+		sizePrecision, amountPrecision := getRoundingConfig(outcome.TickSize)
+
+		// Calculate token size with rounding
+		takerTokens := roundAmount(size/outcome.Price, sizePrecision)
+
+		// Validate against minimum
+		if takerTokens < outcome.MinSize {
+			return nil, fmt.Errorf("outcome %d: order size %.2f below minimum %.2f tokens",
+				i, takerTokens, outcome.MinSize)
+		}
+
+		// Build order with rounded amounts
+		makerUSD := roundAmount(takerTokens*outcome.Price, amountPrecision)
+		makerAmount := usdToRawAmount(makerUSD)
+		takerAmount := usdToRawAmount(takerTokens)
+
+		orderData := &model.OrderData{
+			Maker:         makerAddress,
+			Taker:         "0x0000000000000000000000000000000000000000",
+			TokenId:       outcome.TokenID,
+			MakerAmount:   makerAmount,
+			TakerAmount:   takerAmount,
+			Side:          model.BUY,
+			FeeRateBps:    "0",
+			Nonce:         "0",
+			Signer:        signerAddress,
+			Expiration:    "0",
+			SignatureType: c.signatureType,
+		}
+
+		signedOrder, err := c.orderBuilder.BuildSignedOrder(c.privateKey, orderData, model.CTFExchange)
+		if err != nil {
+			return nil, fmt.Errorf("build order %d: %w", i, err)
+		}
+
+		// Convert to JSON and add to batch
+		orderJSON := c.convertToOrderJSON(signedOrder)
+		batchReq = append(batchReq, types.OrderSubmissionRequest{
+			Order:     orderJSON,
+			Owner:     c.apiKey,
+			OrderType: "GTC",
+		})
+	}
+
+	c.logger.Info("multi-outcome-batch-orders-built",
+		zap.String("maker", makerAddress),
+		zap.String("signer", signerAddress),
+		zap.Int("outcome-count", len(outcomes)),
+		zap.Float64("size", size))
+
+	// Submit batch
+	batchResp, err := c.submitBatchOrder(ctx, batchReq)
+	if err != nil {
+		return nil, fmt.Errorf("submit batch: %w", err)
+	}
+
+	// Validate we got N responses
+	if len(batchResp) != len(outcomes) {
+		return nil, fmt.Errorf("expected %d responses, got %d", len(outcomes), len(batchResp))
+	}
+
+	// Convert to response pointers
+	responses = make([]*types.OrderSubmissionResponse, len(batchResp))
+	for i := range batchResp {
+		responses[i] = &batchResp[i]
+	}
+
+	// Check for any errors
+	var errMsgs []string
+	for i, resp := range responses {
+		if !resp.Success {
+			errMsgs = append(errMsgs, fmt.Sprintf("outcome %d: %s", i, resp.ErrorMsg))
+		}
+	}
+
+	if len(errMsgs) > 0 {
+		return responses, &types.OrderError{
+			Code:    "BATCH_ERROR",
+			Message: strings.Join(errMsgs, "; "),
+		}
+	}
+
+	return responses, nil
 }
 
 // convertToOrderJSON converts a signed order to JSON format

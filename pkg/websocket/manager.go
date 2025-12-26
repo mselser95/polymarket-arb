@@ -282,61 +282,126 @@ func (m *Manager) readLoop() {
 			return
 		}
 
-		// Parse message - Polymarket sends an array of messages
+		// Parse message - Try different formats based on Polymarket CLOB API
+
+		// Try #1: Array of book messages (initial snapshots)
 		var obMsgs []types.OrderbookMessage
-		err = json.Unmarshal(message, &obMsgs)
-		if err != nil {
-			// Try to identify message type for better logging
-			messageStr := string(message)
+		bookErr := json.Unmarshal(message, &obMsgs)
+		if bookErr == nil && len(obMsgs) > 0 {
+			// Successfully parsed as book message array
+			for i := range obMsgs {
+				start := time.Now()
+				obMsg := &obMsgs[i]
 
-			// Check if it's a heartbeat/keepalive (empty array or minimal content)
-			if messageStr == "[]" || messageStr == "" || len(message) < 10 {
-				m.logger.Debug("websocket-heartbeat-received",
-					zap.Int("bytes", len(message)))
-				continue
-			}
+				MessagesReceivedTotal.WithLabelValues(obMsg.EventType).Inc()
 
-			// Check if it's a subscription confirmation or other control message
-			var controlMsg map[string]interface{}
-			if json.Unmarshal(message, &controlMsg) == nil {
-				if msgType, ok := controlMsg["type"].(string); ok {
-					m.logger.Debug("websocket-control-message",
-						zap.String("type", msgType),
-						zap.Int("bytes", len(message)))
-					continue
+				// Send to channel (non-blocking)
+				select {
+				case m.messageChan <- obMsg:
+				default:
+					m.logger.Warn("message-channel-full", zap.String("event-type", obMsg.EventType))
+					MessagesDroppedTotal.WithLabelValues("channel_full").Inc()
 				}
-			}
 
-			// Unknown message format
-			previewLen := len(messageStr)
-			if previewLen > 100 {
-				previewLen = 100
+				// Observe message processing latency
+				MessageLatencySeconds.Observe(time.Since(start).Seconds())
 			}
-			m.logger.Debug("websocket-unparseable-message",
-				zap.Error(err),
-				zap.Int("bytes", len(message)),
-				zap.String("preview", messageStr[:previewLen]))
 			continue
 		}
 
-		// Process each message in the array
-		for i := range obMsgs {
-			start := time.Now()
-			obMsg := &obMsgs[i]
+		// Try #2: PriceChangeMessage (incremental updates)
+		var priceChangeMsg types.PriceChangeMessage
+		priceErr := json.Unmarshal(message, &priceChangeMsg)
+		if priceErr == nil && priceChangeMsg.EventType == "price_change" {
+			// Successfully parsed as price_change message
+			// Convert each PriceChange to OrderbookMessage format
+			for _, pc := range priceChangeMsg.PriceChanges {
+				start := time.Now()
 
-			MessagesReceivedTotal.WithLabelValues(obMsg.EventType).Inc()
+				// Convert to OrderbookMessage for compatibility with existing orderbook manager
+				// NOTE: price_change messages from CLOB API only include best_bid/best_ask prices,
+				// not sizes. We set size to "0" here, which will overwrite existing size in the snapshot.
+				// This is acceptable since we prioritize price updates over size accuracy.
+				// Initial book snapshots provide accurate sizes.
+				obMsg := &types.OrderbookMessage{
+					EventType: "price_change",
+					AssetID:   pc.AssetID,
+					Market:    priceChangeMsg.Market,
+					Timestamp: priceChangeMsg.Timestamp,
+					Bids:      []types.PriceLevel{{Price: pc.BestBid, Size: "0"}},
+					Asks:      []types.PriceLevel{{Price: pc.BestAsk, Size: "0"}},
+				}
 
-			// Send to channel (non-blocking)
-			select {
-			case m.messageChan <- obMsg:
-			default:
-				m.logger.Warn("message-channel-full", zap.String("event-type", obMsg.EventType))
-				MessagesDroppedTotal.WithLabelValues("channel_full").Inc()
+				MessagesReceivedTotal.WithLabelValues("price_change").Inc()
+
+				m.logger.Debug("price-change-message-converted",
+					zap.String("asset-id", pc.AssetID),
+					zap.String("best-bid", pc.BestBid),
+					zap.String("best-ask", pc.BestAsk))
+
+				// Send to channel (non-blocking)
+				select {
+				case m.messageChan <- obMsg:
+				default:
+					m.logger.Warn("message-channel-full", zap.String("event-type", "price_change"))
+					MessagesDroppedTotal.WithLabelValues("channel_full").Inc()
+				}
+
+				// Observe message processing latency
+				MessageLatencySeconds.Observe(time.Since(start).Seconds())
 			}
-
-			// Observe message processing latency
-			MessageLatencySeconds.Observe(time.Since(start).Seconds())
+			continue
 		}
+
+		// Try #3: LastTradePriceMessage (trade execution notifications)
+		var tradeMsg types.LastTradePriceMessage
+		tradeErr := json.Unmarshal(message, &tradeMsg)
+		if tradeErr == nil && tradeMsg.EventType == "last_trade_price" {
+			// Successfully parsed as last_trade_price message
+			// These are informational only - we don't use them for arbitrage detection
+			MessagesReceivedTotal.WithLabelValues("last_trade_price").Inc()
+
+			m.logger.Debug("last-trade-price-received",
+				zap.String("market", tradeMsg.Market),
+				zap.String("asset-id", tradeMsg.AssetID),
+				zap.String("price", tradeMsg.Price),
+				zap.String("size", tradeMsg.Size),
+				zap.String("side", tradeMsg.Side))
+			continue
+		}
+
+		// Try #4: Identify other message types for better logging
+		messageStr := string(message)
+
+		// Check if it's a heartbeat/keepalive (empty array or minimal content)
+		if messageStr == "[]" || messageStr == "" || len(message) < 10 {
+			m.logger.Debug("websocket-heartbeat-received",
+				zap.Int("bytes", len(message)))
+			continue
+		}
+
+		// Check if it's a subscription confirmation or other control message
+		var controlMsg map[string]interface{}
+		if json.Unmarshal(message, &controlMsg) == nil {
+			if msgType, ok := controlMsg["type"].(string); ok {
+				m.logger.Debug("websocket-control-message",
+					zap.String("type", msgType),
+					zap.Int("bytes", len(message)))
+				continue
+			}
+		}
+
+		// Unknown message format - log with preview for debugging
+		previewLen := len(messageStr)
+		if previewLen > 500 {
+			previewLen = 500
+		}
+		m.logger.Warn("websocket-unparseable-message",
+			zap.NamedError("book-parse-error", bookErr),
+			zap.NamedError("price-change-parse-error", priceErr),
+			zap.NamedError("trade-parse-error", tradeErr),
+			zap.Int("bytes", len(message)),
+			zap.String("message-preview", messageStr[:previewLen]))
 	}
 }
 

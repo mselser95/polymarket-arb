@@ -22,7 +22,7 @@
       "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
       "targets": [
         {
-          "expr": "polymarket_ws_active_connections",
+          "expr": "polymarket_ws_active_connections{service=\"arb-bot\"}",
           "refId": "A"
         }
       ],
@@ -52,7 +52,7 @@
       "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
       "targets": [
         {
-          "expr": "polymarket_ws_pool_active_connections",
+          "expr": "polymarket_ws_pool_active_connections{service=\"arb-bot\"}",
           "refId": "A"
         }
       ],
@@ -83,7 +83,7 @@
       "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, rate(polymarket_ws_message_latency_seconds_bucket[1m]))",
+          "expr": "histogram_quantile(0.99, rate(polymarket_ws_message_latency_seconds_bucket{service=\"arb-bot\"}[1m]))",
           "refId": "A"
         }
       ],
@@ -108,7 +108,7 @@
       "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
       "targets": [
         {
-          "expr": "polymarket_cache_hit_rate",
+          "expr": "polymarket_cache_hit_rate{service=\"arb-bot\"}",
           "refId": "A"
         }
       ],
@@ -134,7 +134,7 @@
       "gridPos": {"h": 4, "w": 6, "x": 0, "y": 4},
       "targets": [
         {
-          "expr": "polymarket_ws_subscription_count",
+          "expr": "polymarket_ws_subscription_count{service=\"arb-bot\"}",
           "refId": "A"
         }
       ],
@@ -159,7 +159,7 @@
       "gridPos": {"h": 4, "w": 9, "x": 6, "y": 4},
       "targets": [
         {
-          "expr": "rate(polymarket_ws_pool_subscription_distribution_bucket[1m])",
+          "expr": "rate(polymarket_ws_pool_subscription_distribution_bucket{service=\"arb-bot\"}[1m])",
           "format": "heatmap",
           "legendFormat": "{{le}}",
           "refId": "A"
@@ -185,7 +185,7 @@
       "gridPos": {"h": 4, "w": 9, "x": 15, "y": 4},
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, rate(polymarket_ws_pool_multiplex_latency_seconds_bucket[1m])) * 1000000",
+          "expr": "histogram_quantile(0.99, rate(polymarket_ws_pool_multiplex_latency_seconds_bucket{service=\"arb-bot\"}[1m])) * 1000000",
           "refId": "A"
         }
       ],
@@ -214,7 +214,7 @@
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
       "targets": [
         {
-          "expr": "rate(polymarket_execution_errors_by_type_total[1m])",
+          "expr": "rate(polymarket_execution_errors_by_type_total{service=\"arb-bot\"}[1m])",
           "legendFormat": "{{error_type}}",
           "refId": "A"
         }
@@ -233,12 +233,12 @@
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
       "targets": [
         {
-          "expr": "rate(polymarket_ws_messages_dropped_total[1m])",
+          "expr": "rate(polymarket_ws_messages_dropped_total{service=\"arb-bot\"}[1m])",
           "legendFormat": "WebSocket",
           "refId": "A"
         },
         {
-          "expr": "rate(polymarket_orderbook_updates_dropped_total[1m])",
+          "expr": "rate(polymarket_orderbook_updates_dropped_total{service=\"arb-bot\"}[1m])",
           "legendFormat": "Orderbook",
           "refId": "B"
         }
@@ -258,17 +258,17 @@
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, rate(polymarket_orderbook_lock_contention_seconds_bucket[1m]))",
+          "expr": "histogram_quantile(0.50, rate(polymarket_orderbook_lock_contention_seconds_bucket{service=\"arb-bot\"}[1m]))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, rate(polymarket_orderbook_lock_contention_seconds_bucket[1m]))",
+          "expr": "histogram_quantile(0.95, rate(polymarket_orderbook_lock_contention_seconds_bucket{service=\"arb-bot\"}[1m]))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, rate(polymarket_orderbook_lock_contention_seconds_bucket[1m]))",
+          "expr": "histogram_quantile(0.99, rate(polymarket_orderbook_lock_contention_seconds_bucket{service=\"arb-bot\"}[1m]))",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -287,12 +287,12 @@
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
       "targets": [
         {
-          "expr": "rate(polymarket_ws_reconnect_attempts_total[1m])",
+          "expr": "rate(polymarket_ws_reconnect_attempts_total{service=\"arb-bot\"}[1m])",
           "legendFormat": "Attempts",
           "refId": "A"
         },
         {
-          "expr": "rate(polymarket_ws_reconnect_failures_total[1m])",
+          "expr": "rate(polymarket_ws_reconnect_failures_total{service=\"arb-bot\"}[1m])",
           "legendFormat": "Failures",
           "refId": "B"
         }
@@ -334,12 +334,12 @@
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, rate(polymarket_ws_connection_duration_seconds_bucket[5m]))",
+          "expr": "histogram_quantile(0.50, rate(polymarket_ws_connection_duration_seconds_bucket{service=\"arb-bot\"}[5m]))",
           "legendFormat": "Median",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, rate(polymarket_ws_connection_duration_seconds_bucket[5m]))",
+          "expr": "histogram_quantile(0.95, rate(polymarket_ws_connection_duration_seconds_bucket{service=\"arb-bot\"}[5m]))",
           "legendFormat": "p95",
           "refId": "B"
         }
@@ -357,12 +357,12 @@
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, rate(polymarket_discovery_poll_duration_seconds_bucket[1m]))",
+          "expr": "histogram_quantile(0.50, rate(polymarket_discovery_poll_duration_seconds_bucket{service=\"arb-bot\"}[1m]))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.99, rate(polymarket_discovery_poll_duration_seconds_bucket[1m]))",
+          "expr": "histogram_quantile(0.99, rate(polymarket_discovery_poll_duration_seconds_bucket{service=\"arb-bot\"}[1m]))",
           "legendFormat": "p99",
           "refId": "B"
         }
@@ -380,7 +380,7 @@
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
       "targets": [
         {
-          "expr": "polymarket_orderbook_snapshots_tracked",
+          "expr": "polymarket_orderbook_snapshots_tracked{service=\"arb-bot\"}",
           "refId": "A"
         }
       ],

@@ -179,8 +179,8 @@ func TestE2E_ArbitrageFlow(t *testing.T) {
 		t.Errorf("expected market ID %s, got %s", market.ID, opp.MarketID)
 	}
 
-	if opp.PriceSum >= 0.995 {
-		t.Errorf("expected price sum below threshold, got %f", opp.PriceSum)
+	if opp.TotalPriceSum >= 0.995 {
+		t.Errorf("expected total price sum below threshold, got %f", opp.TotalPriceSum)
 	}
 
 	t.Logf("✓ Arbitrage opportunity detected: market=%s, profit=%d BPS", opp.MarketSlug, opp.ProfitBPS)
