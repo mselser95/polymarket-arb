@@ -104,8 +104,8 @@ func (d *Detector) checkArbitrageForToken(update *types.OrderbookSnapshot) {
 	// Get orderbooks for ALL outcomes in this market
 	orderbooks := make([]*types.OrderbookSnapshot, 0, len(targetMarket.Outcomes))
 	for _, outcome := range targetMarket.Outcomes {
-		snapshot, exists := d.obManager.GetSnapshot(outcome.TokenID)
-		if !exists {
+		snapshot, ok := d.obManager.GetSnapshot(outcome.TokenID)
+		if !ok {
 			// Missing orderbook for this outcome - skip entire market
 			d.logger.Debug("orderbook-missing-for-outcome",
 				zap.String("market-id", targetMarket.MarketID),
