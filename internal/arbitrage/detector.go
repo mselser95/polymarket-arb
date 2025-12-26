@@ -130,6 +130,15 @@ func (d *Detector) checkArbitrageForToken(update *types.OrderbookSnapshot) {
 		return
 	}
 
+	// Track end-to-end latency (from orderbook update to opportunity detection)
+	// Use the most recent update time from either orderbook
+	latestUpdate := yesSnapshot.LastUpdated
+	if noSnapshot.LastUpdated.After(latestUpdate) {
+		latestUpdate = noSnapshot.LastUpdated
+	}
+	e2eLatency := time.Since(latestUpdate).Seconds()
+	EndToEndLatencySeconds.Observe(e2eLatency)
+
 	// Store opportunity
 	err := d.storage.StoreOpportunity(d.ctx, opp)
 	if err != nil {
@@ -203,10 +212,12 @@ func (d *Detector) detect(
 ) (*Opportunity, bool) {
 	// Validate orderbooks - use ASK prices since we're buying
 	if yesBook.BestAskPrice <= 0 || noBook.BestAskPrice <= 0 {
+		OpportunitiesRejectedTotal.WithLabelValues("invalid_price").Inc()
 		return nil, false
 	}
 
 	if yesBook.BestAskSize <= 0 || noBook.BestAskSize <= 0 {
+		OpportunitiesRejectedTotal.WithLabelValues("invalid_size").Inc()
 		return nil, false
 	}
 
@@ -215,6 +226,7 @@ func (d *Detector) detect(
 
 	// Check if arbitrage exists
 	if priceSum >= d.config.Threshold {
+		OpportunitiesRejectedTotal.WithLabelValues("price_above_threshold").Inc()
 		return nil, false
 	}
 
@@ -230,6 +242,7 @@ func (d *Detector) detect(
 			zap.String("market-slug", market.MarketSlug),
 			zap.Float64("size", maxSize),
 			zap.Float64("min-size", d.config.MinTradeSize))
+		OpportunitiesRejectedTotal.WithLabelValues("below_min_size").Inc()
 		return nil, false
 	}
 
@@ -281,6 +294,7 @@ func (d *Detector) detect(
 			zap.Float64("yes-min-size", yesMinSize),
 			zap.Float64("no-token-size", noTokenSize),
 			zap.Float64("no-min-size", noMinSize))
+		OpportunitiesRejectedTotal.WithLabelValues("below_market_min").Inc()
 		return nil, false
 	}
 
@@ -316,6 +330,7 @@ func (d *Detector) detect(
 	OpportunitiesDetectedTotal.Inc()
 	OpportunityProfitBPS.Observe(float64(opp.ProfitBPS))
 	OpportunitySizeUSD.Observe(opp.MaxTradeSize)
+	NetProfitBPS.Observe(float64(opp.NetProfitBPS))
 
 	return opp, true
 }

@@ -38,9 +38,12 @@ func (c *CachedMetadataClient) GetTokenMetadata(ctx context.Context, tokenID str
 		cacheKey := fmt.Sprintf("metadata:%s", tokenID)
 		if cached, ok := c.cache.Get(cacheKey); ok {
 			if meta, ok := cached.(*TokenMetadata); ok {
+				MetadataCacheHitsTotal.Inc()
 				return meta.TickSize, meta.MinOrderSize, nil
 			}
 		}
+		// Cache miss
+		MetadataCacheMissesTotal.Inc()
 	}
 
 	// Fetch from API

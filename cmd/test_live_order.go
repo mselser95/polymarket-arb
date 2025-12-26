@@ -18,6 +18,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/joho/godotenv"
 	"github.com/mselser95/polymarket-arb/internal/discovery"
+	"github.com/mselser95/polymarket-arb/pkg/types"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 )
@@ -62,26 +63,6 @@ type OrderRequest struct {
 	Side       string `json:"side"`  // "BUY" or "SELL"
 	OrderType  string `json:"type"`  // "GTC", "FOK", "IOC"
 	Expiration int64  `json:"expiration,omitempty"`
-}
-
-// OrderResponse represents a CLOB API order response
-type OrderResponse struct {
-	OrderID      string  `json:"orderID"`
-	Status       string  `json:"status"`
-	TokenID      string  `json:"asset_id"`
-	Price        float64 `json:"price,string"`
-	Size         float64 `json:"original_size,string"`
-	SizeFilled   float64 `json:"size_matched,string"`
-	Side         string  `json:"side"`
-	CreatedAt    string  `json:"created_at"`
-	UpdatedAt    string  `json:"updated_at"`
-	OrderType    string  `json:"type"`
-	MarketID     string  `json:"market"`
-	Outcome      string  `json:"outcome"`
-	Owner        string  `json:"owner"`
-	MakerAddress string  `json:"maker_address"`
-	Message      string  `json:"message,omitempty"`
-	Error        string  `json:"error,omitempty"`
 }
 
 // ErrorResponse represents an API error response
@@ -191,7 +172,7 @@ func runTestLiveOrder(cmd *cobra.Command, args []string) error {
 		OrderType: "GTC", // Good Till Cancelled
 	}
 
-	var yesResp *OrderResponse
+	var yesResp *types.OrderSubmissionResponse
 	if paperMode {
 		yesResp = simulatePaperOrder(yesOrderReq, market.ID, "YES")
 		displayOrderResponse("YES", yesResp, true)
@@ -225,7 +206,7 @@ func runTestLiveOrder(cmd *cobra.Command, args []string) error {
 		OrderType: "GTC",
 	}
 
-	var noResp *OrderResponse
+	var noResp *types.OrderSubmissionResponse
 	if paperMode {
 		noResp = simulatePaperOrder(noOrderReq, market.ID, "NO")
 		displayOrderResponse("NO", noResp, true)
@@ -267,34 +248,44 @@ func runTestLiveOrder(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func simulatePaperOrder(orderReq OrderRequest, marketID string, outcome string) *OrderResponse {
-	// Simulate a successful order response
+func simulatePaperOrder(
+	orderReq OrderRequest,
+	marketID string,
+	outcome string,
+) (resp *types.OrderSubmissionResponse) {
+	// Simulate a successful order response using actual API response format
 	timestamp := time.Now()
 	orderID := fmt.Sprintf("paper_%d", timestamp.UnixNano())
 
-	return &OrderResponse{
+	// Calculate amounts (simulate based on price and size)
+	sizeFloat := mustParseFloat(orderReq.Size)
+	priceFloat := mustParseFloat(orderReq.Price)
+	takingAmount := fmt.Sprintf("%.0f", sizeFloat*1000000)    // USDC raw amount
+	makingAmount := fmt.Sprintf("%.0f", priceFloat*1000000)   // Token raw amount
+
+	resp = &types.OrderSubmissionResponse{
+		Success:      true,
+		ErrorMsg:     "",
 		OrderID:      orderID,
-		Status:       "LIVE", // Simulated as open order
-		TokenID:      orderReq.TokenID,
-		Price:        mustParseFloat(orderReq.Price),
-		Size:         mustParseFloat(orderReq.Size),
-		SizeFilled:   0.0, // No fills in paper mode
-		Side:         orderReq.Side,
-		CreatedAt:    timestamp.Format(time.RFC3339),
-		UpdatedAt:    timestamp.Format(time.RFC3339),
-		OrderType:    orderReq.OrderType,
-		MarketID:     marketID,
-		Outcome:      outcome,
-		Owner:        "paper_trader",
-		MakerAddress: "0x0000000000000000000000000000000000000000",
+		OrderHashes:  []string{},     // No tx hashes in paper mode
+		Status:       "live",          // Simulated as open order
+		TakingAmount: takingAmount,
+		MakingAmount: makingAmount,
 	}
+
+	return resp
 }
 
-func submitLiveOrder(ctx context.Context, orderReq OrderRequest, marketID string) (*OrderResponse, error) {
+func submitLiveOrder(
+	ctx context.Context,
+	orderReq OrderRequest,
+	marketID string,
+) (resp *types.OrderSubmissionResponse, err error) {
 	// Load config from environment
 	cfg, err := loadConfig()
 	if err != nil {
-		return nil, fmt.Errorf("load config: %w", err)
+		err = fmt.Errorf("load config: %w", err)
+		return resp, err
 	}
 
 	// Polymarket CLOB API endpoint
@@ -303,7 +294,8 @@ func submitLiveOrder(ctx context.Context, orderReq OrderRequest, marketID string
 	// Marshal order request
 	orderJSON, err := json.Marshal(orderReq)
 	if err != nil {
-		return nil, fmt.Errorf("marshal order: %w", err)
+		err = fmt.Errorf("marshal order: %w", err)
+		return resp, err
 	}
 
 	// Create timestamp (Unix SECONDS, not milliseconds!)
@@ -315,7 +307,8 @@ func submitLiveOrder(ctx context.Context, orderReq OrderRequest, marketID string
 		// Try standard base64 encoding
 		secretBytes, err = base64.StdEncoding.DecodeString(cfg.Secret)
 		if err != nil {
-			return nil, fmt.Errorf("decode secret: %w", err)
+			err = fmt.Errorf("decode secret: %w", err)
+			return resp, err
 		}
 	}
 
@@ -327,7 +320,8 @@ func submitLiveOrder(ctx context.Context, orderReq OrderRequest, marketID string
 	// Create HTTP request
 	req, err := http.NewRequestWithContext(ctx, "POST", clobURL, bytes.NewBuffer(orderJSON))
 	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+		err = fmt.Errorf("create request: %w", err)
+		return resp, err
 	}
 
 	// Add L2 authentication headers
@@ -344,16 +338,18 @@ func submitLiveOrder(ctx context.Context, orderReq OrderRequest, marketID string
 
 	// Send request
 	httpClient := &http.Client{Timeout: 10 * time.Second}
-	resp, err := httpClient.Do(req)
+	httpResp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("send request: %w", err)
+		err = fmt.Errorf("send request: %w", err)
+		return resp, err
 	}
-	defer resp.Body.Close()
+	defer httpResp.Body.Close()
 
 	// Read response body
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(httpResp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
+		err = fmt.Errorf("read response: %w", err)
+		return resp, err
 	}
 
 	// Log full request details for debugging
@@ -368,25 +364,28 @@ func submitLiveOrder(ctx context.Context, orderReq OrderRequest, marketID string
 
 	// Check status code
 	fmt.Printf("\nDebug - Response:\n")
-	fmt.Printf("  Status Code: %d\n", resp.StatusCode)
+	fmt.Printf("  Status Code: %d\n", httpResp.StatusCode)
 	fmt.Printf("  Response Body: %s\n\n", string(body))
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+	if httpResp.StatusCode != http.StatusOK && httpResp.StatusCode != http.StatusCreated {
 		// Try to parse error response
 		var errResp ErrorResponse
 		if json.Unmarshal(body, &errResp) == nil {
-			return nil, fmt.Errorf("API error (status %d): %s - %s", resp.StatusCode, errResp.Error, errResp.Message)
+			err = fmt.Errorf("API error (status %d): %s - %s", httpResp.StatusCode, errResp.Error, errResp.Message)
+			return resp, err
 		}
-		return nil, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
+		err = fmt.Errorf("API error (status %d): %s", httpResp.StatusCode, string(body))
+		return resp, err
 	}
 
 	// Parse success response
-	var orderResp OrderResponse
-	if err := json.Unmarshal(body, &orderResp); err != nil {
-		return nil, fmt.Errorf("parse response: %w\nBody: %s", err, string(body))
+	err = json.Unmarshal(body, &resp)
+	if err != nil {
+		err = fmt.Errorf("parse response: %w\nBody: %s", err, string(body))
+		return resp, err
 	}
 
-	return &orderResp, nil
+	return resp, nil
 }
 
 func loadConfig() (*Config, error) {
@@ -444,28 +443,25 @@ func createHMACSignature(message string, secret []byte) string {
 	return base64.StdEncoding.EncodeToString(h.Sum(nil))
 }
 
-func displayOrderResponse(outcome string, resp *OrderResponse, isPaper bool) {
+func displayOrderResponse(outcome string, resp *types.OrderSubmissionResponse, isPaper bool) {
 	if isPaper {
 		fmt.Printf("📝 %s Order (Paper)\n", outcome)
 	} else {
 		fmt.Printf("✅ %s Order Submitted\n", outcome)
 	}
 
+	fmt.Printf("  Success: %v\n", resp.Success)
 	fmt.Printf("  Order ID: %s\n", resp.OrderID)
 	fmt.Printf("  Status: %s\n", resp.Status)
-	fmt.Printf("  Token ID: %s\n", resp.TokenID)
-	fmt.Printf("  Price: %.4f\n", resp.Price)
-	fmt.Printf("  Size: %.2f\n", resp.Size)
-	fmt.Printf("  Filled: %.2f\n", resp.SizeFilled)
-	fmt.Printf("  Side: %s\n", resp.Side)
-	fmt.Printf("  Type: %s\n", resp.OrderType)
-	fmt.Printf("  Created: %s\n", resp.CreatedAt)
+	fmt.Printf("  Taking Amount: %s\n", resp.TakingAmount)
+	fmt.Printf("  Making Amount: %s\n", resp.MakingAmount)
 
-	if resp.Message != "" {
-		fmt.Printf("  Message: %s\n", resp.Message)
+	if len(resp.OrderHashes) > 0 {
+		fmt.Printf("  Order Hashes: %v\n", resp.OrderHashes)
 	}
-	if resp.Error != "" {
-		fmt.Printf("  Error: %s\n", resp.Error)
+
+	if resp.ErrorMsg != "" {
+		fmt.Printf("  Error Message: %s\n", resp.ErrorMsg)
 	}
 	fmt.Println()
 }
@@ -476,21 +472,23 @@ func mustParseFloat(s string) float64 {
 	return f
 }
 
-func loadMockResponse(filename string) (*OrderResponse, error) {
+func loadMockResponse(filename string) (resp *types.OrderSubmissionResponse, err error) {
 	data, err := os.ReadFile(filename)
 	if err != nil {
-		return nil, fmt.Errorf("read mock file: %w", err)
+		err = fmt.Errorf("read mock file: %w", err)
+		return resp, err
 	}
 
-	var resp OrderResponse
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, fmt.Errorf("parse mock response: %w", err)
+	err = json.Unmarshal(data, &resp)
+	if err != nil {
+		err = fmt.Errorf("parse mock response: %w", err)
+		return resp, err
 	}
 
-	return &resp, nil
+	return resp, nil
 }
 
-func saveOrderResponse(filename string, resp *OrderResponse) {
+func saveOrderResponse(filename string, resp *types.OrderSubmissionResponse) {
 	data, err := json.MarshalIndent(resp, "", "  ")
 	if err != nil {
 		fmt.Printf("Warning: failed to marshal response: %v\n", err)

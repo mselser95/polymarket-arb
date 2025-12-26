@@ -20,6 +20,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/mselser95/polymarket-arb/internal/discovery"
 	"github.com/mselser95/polymarket-arb/internal/markets"
+	"github.com/mselser95/polymarket-arb/pkg/types"
 	"github.com/polymarket/go-order-utils/pkg/builder"
 	"github.com/polymarket/go-order-utils/pkg/model"
 	"github.com/spf13/cobra"
@@ -259,10 +260,11 @@ func runPlaceOrders(cmd *cobra.Command, args []string) error {
 		fmt.Printf("❌ YES order failed: %v\n\n", err)
 	} else {
 		fmt.Printf("✅ YES order submitted!\n")
+		fmt.Printf("  Success: %v\n", yesResp.Success)
 		fmt.Printf("  Order ID: %s\n", yesResp.OrderID)
 		fmt.Printf("  Status: %s\n", yesResp.Status)
-		fmt.Printf("  Price: %.4f\n", yesResp.Price)
-		fmt.Printf("  Size: %.2f (Filled: %.2f)\n\n", yesResp.Size, yesResp.SizeFilled)
+		fmt.Printf("  Taking Amount: %s\n", yesResp.TakingAmount)
+		fmt.Printf("  Making Amount: %s\n\n", yesResp.MakingAmount)
 	}
 
 	fmt.Printf("=== Submitting NO Order ===\n\n")
@@ -272,10 +274,11 @@ func runPlaceOrders(cmd *cobra.Command, args []string) error {
 		fmt.Printf("❌ NO order failed: %v\n\n", err)
 	} else {
 		fmt.Printf("✅ NO order submitted!\n")
+		fmt.Printf("  Success: %v\n", noResp.Success)
 		fmt.Printf("  Order ID: %s\n", noResp.OrderID)
 		fmt.Printf("  Status: %s\n", noResp.Status)
-		fmt.Printf("  Price: %.4f\n", noResp.Price)
-		fmt.Printf("  Size: %.2f (Filled: %.2f)\n\n", noResp.Size, noResp.SizeFilled)
+		fmt.Printf("  Taking Amount: %s\n", noResp.TakingAmount)
+		fmt.Printf("  Making Amount: %s\n\n", noResp.MakingAmount)
 	}
 
 	return nil
@@ -375,42 +378,11 @@ func usdToRawAmount(usd float64) string {
 	return fmt.Sprintf("%d", rawAmount)
 }
 
-type SignedOrderJSON struct {
-	Salt          int64  `json:"salt"`          // Integer, not string
-	Maker         string `json:"maker"`
-	Signer        string `json:"signer"`
-	Taker         string `json:"taker"`
-	TokenID       string `json:"tokenId"`
-	MakerAmount   string `json:"makerAmount"`
-	TakerAmount   string `json:"takerAmount"`
-	Side          string `json:"side"`
-	Expiration    string `json:"expiration"`
-	Nonce         string `json:"nonce"`
-	FeeRateBps    string `json:"feeRateBps"`
-	SignatureType int    `json:"signatureType"` // Integer, not string
-	Signature     string `json:"signature"`
-}
-
-type OrderResponseItem struct {
-	OrderID      string  `json:"orderID"`
-	Status       string  `json:"status"`
-	TokenID      string  `json:"asset_id"`
-	Price        float64 `json:"price,string"`
-	Size         float64 `json:"original_size,string"`
-	SizeFilled   float64 `json:"size_matched,string"`
-	Side         string  `json:"side"`
-	CreatedAt    string  `json:"created_at"`
-	UpdatedAt    string  `json:"updated_at"`
-	OrderType    string  `json:"type"`
-	MarketID     string  `json:"market"`
-	Outcome      string  `json:"outcome"`
-	Owner        string  `json:"owner"`
-	MakerAddress string  `json:"maker_address"`
-	Message      string  `json:"message,omitempty"`
-	Error        string  `json:"error,omitempty"`
-}
-
-func submitSingleOrder(ctx context.Context, cfg *PlaceOrdersConfig, order *model.SignedOrder) (*OrderResponseItem, error) {
+func submitSingleOrder(
+	ctx context.Context,
+	cfg *PlaceOrdersConfig,
+	order *model.SignedOrder,
+) (resp *types.OrderSubmissionResponse, err error) {
 	// Convert Side to string ("BUY" or "SELL")
 	sideStr := "BUY"
 	if order.Side.Uint64() == uint64(model.SELL) {
@@ -418,8 +390,8 @@ func submitSingleOrder(ctx context.Context, cfg *PlaceOrdersConfig, order *model
 	}
 
 	// Convert to JSON format
-	jsonOrder := SignedOrderJSON{
-		Salt:          order.Salt.Int64(),                      // Integer
+	jsonOrder := types.SignedOrderJSON{
+		Salt:          order.Salt.Int64(),
 		Maker:         order.Maker.Hex(),
 		Signer:        order.Signer.Hex(),
 		Taker:         order.Taker.Hex(),
@@ -430,21 +402,22 @@ func submitSingleOrder(ctx context.Context, cfg *PlaceOrdersConfig, order *model
 		Expiration:    order.Expiration.String(),
 		Nonce:         order.Nonce.String(),
 		FeeRateBps:    order.FeeRateBps.String(),
-		SignatureType: int(order.SignatureType.Int64()),        // Integer
+		SignatureType: int(order.SignatureType.Int64()),
 		Signature:     "0x" + common.Bytes2Hex(order.Signature),
 	}
 
 	// Wrap order in the required structure
 	// Note: "owner" is the API key, not the maker address (per Python client)
-	orderRequest := map[string]interface{}{
-		"order":     jsonOrder,
-		"owner":     cfg.APIKey,
-		"orderType": "GTC",
+	orderRequest := types.OrderSubmissionRequest{
+		Order:     jsonOrder,
+		Owner:     cfg.APIKey,
+		OrderType: "GTC",
 	}
 
 	reqBody, err := json.Marshal(orderRequest)
 	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
+		err = fmt.Errorf("marshal request: %w", err)
+		return resp, err
 	}
 
 	// Create HMAC signature
@@ -457,7 +430,8 @@ func submitSingleOrder(ctx context.Context, cfg *PlaceOrdersConfig, order *model
 	// Decode secret using URL-safe base64 (Python client uses urlsafe_b64decode)
 	secretBytes, err := base64.URLEncoding.DecodeString(cfg.Secret)
 	if err != nil {
-		return nil, fmt.Errorf("decode secret: %w", err)
+		err = fmt.Errorf("decode secret: %w", err)
+		return resp, err
 	}
 
 	h := hmac.New(sha256.New, secretBytes)
@@ -469,7 +443,8 @@ func submitSingleOrder(ctx context.Context, cfg *PlaceOrdersConfig, order *model
 	url := "https://clob.polymarket.com" + requestPath
 	req, err := http.NewRequestWithContext(ctx, method, url, strings.NewReader(string(reqBody)))
 	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+		err = fmt.Errorf("create request: %w", err)
+		return resp, err
 	}
 
 	// POLY_ADDRESS header should be the EOA address (per Python client: signer.address())
@@ -481,25 +456,29 @@ func submitSingleOrder(ctx context.Context, cfg *PlaceOrdersConfig, order *model
 	req.Header.Set("POLY_ADDRESS", cfg.Address) // EOA address from private key
 
 	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	httpResp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("send request: %w", err)
+		err = fmt.Errorf("send request: %w", err)
+		return resp, err
 	}
-	defer resp.Body.Close()
+	defer httpResp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(httpResp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
+		err = fmt.Errorf("read response: %w", err)
+		return resp, err
 	}
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return nil, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
+	if httpResp.StatusCode != http.StatusOK && httpResp.StatusCode != http.StatusCreated {
+		err = fmt.Errorf("API error (status %d): %s", httpResp.StatusCode, string(body))
+		return resp, err
 	}
 
-	var orderResp OrderResponseItem
-	if err := json.Unmarshal(body, &orderResp); err != nil {
-		return nil, fmt.Errorf("parse response: %w", err)
+	err = json.Unmarshal(body, &resp)
+	if err != nil {
+		err = fmt.Errorf("parse response: %w", err)
+		return resp, err
 	}
 
-	return &orderResp, nil
+	return resp, nil
 }

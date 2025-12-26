@@ -1,6 +1,7 @@
 version: '3.8'
 
 services:
+  # PostgreSQL database
   postgres:
     image: postgres:16-alpine
     container_name: polymarket-arb-postgres
@@ -23,6 +24,154 @@ services:
     networks:
       - polymarket-network
 
+  # Prometheus metrics collector
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: polymarket-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - polymarket-network
+    restart: unless-stopped
+
+  # Grafana dashboards
+  grafana:
+    image: grafana/grafana:latest
+    container_name: polymarket-grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=http://localhost:3000
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    networks:
+      - polymarket-network
+    restart: unless-stopped
+
+  # Database initialization (runs migrations once on first start)
+  db-init:
+    image: postgres:16-alpine
+    container_name: polymarket-db-init
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./migrations:/migrations:ro
+      - ./init-db.sh:/init-db.sh:ro
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGUSER: polymarket
+      PGPASSWORD: polymarket123
+      PGDATABASE: polymarket_arb
+    networks:
+      - polymarket-network
+    command: ["/bin/sh", "/init-db.sh"]
+    restart: "no"  # Only run once
+
+  # Polymarket wallet tracker (exposes metrics for Prometheus)
+  wallet-tracker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: polymarket-wallet-tracker
+    command: ["track-balance", "--interval", "1m", "--port", "8080"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
+    environment:
+      # Application
+      LOG_LEVEL: info
+      HTTP_PORT: 8080
+
+      # Polymarket API (loaded from .env)
+      # POLYMARKET_PRIVATE_KEY, POLYMARKET_API_KEY, etc.
+
+      # PostgreSQL (optional, for future persistence)
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: polymarket
+      POSTGRES_PASSWORD: polymarket123
+      POSTGRES_DB: polymarket_arb
+      POSTGRES_SSLMODE: disable
+    env_file:
+      - .env
+    ports:
+      - "8081:8080"
+    networks:
+      - polymarket-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Position redeemer (checks for settled positions periodically)
+  position-redeemer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: polymarket-position-redeemer
+    command: ["redeem-positions", "--auto", "--interval", "1h"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
+    environment:
+      # Application
+      LOG_LEVEL: info
+
+      # Polymarket API (loaded from .env)
+      # POLYMARKET_PRIVATE_KEY required
+
+      # PostgreSQL (optional, for future persistence)
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: polymarket
+      POSTGRES_PASSWORD: polymarket123
+      POSTGRES_DB: polymarket_arb
+      POSTGRES_SSLMODE: disable
+    env_file:
+      - .env
+    networks:
+      - polymarket-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Main arbitrage bot
   app:
     build:
       context: .
@@ -31,6 +180,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
     environment:
       # Application
       LOG_LEVEL: info
@@ -69,18 +220,38 @@ services:
       ARB_DETECTION_INTERVAL: 100ms
       ARB_TAKER_FEE: 0.0100  # 1% taker fee
 
-      # Execution
-      EXECUTION_MODE: paper
+      # Execution - DRY RUN MODE (safe, no real trades)
+      EXECUTION_MODE: dry-run
       EXECUTION_MAX_POSITION_SIZE: 1000.0
+    env_file:
+      - .env
     ports:
-      - "8080:8080"
+      - "8082:8080"
     networks:
       - polymarket-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
 
-# ✅ NAMED VOLUME: Ensures data persistence across container restarts
+# ✅ NAMED VOLUMES: Ensure data persistence across container restarts
 volumes:
   postgres_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
     driver: local
 
 networks:

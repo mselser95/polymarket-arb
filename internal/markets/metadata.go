@@ -103,6 +103,14 @@ func (c *MetadataClient) FetchMinOrderSize(ctx context.Context, tokenID string) 
 
 // FetchTokenMetadata fetches both tick size and min order size for a token
 func (c *MetadataClient) FetchTokenMetadata(ctx context.Context, tokenID string) (tickSize, minOrderSize float64, err error) {
+	start := time.Now()
+	defer func() {
+		MetadataFetchDuration.Observe(time.Since(start).Seconds())
+		if err != nil {
+			MetadataFetchErrorsTotal.Inc()
+		}
+	}()
+
 	tickSize, err = c.FetchTickSize(ctx, tokenID)
 	if err != nil {
 		tickSize = 0.01 // Default

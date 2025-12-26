@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/mselser95/polymarket-arb/pkg/types"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
 
@@ -77,6 +78,9 @@ func (m *Manager) processMessages() {
 
 // handleMessage processes a single orderbook message.
 func (m *Manager) handleMessage(msg *types.OrderbookMessage) error {
+	timer := prometheus.NewTimer(UpdateProcessingDuration)
+	defer timer.ObserveDuration()
+
 	UpdatesTotal.WithLabelValues(msg.EventType).Inc()
 
 	switch msg.EventType {
@@ -113,7 +117,11 @@ func (m *Manager) handleBookMessage(msg *types.OrderbookMessage) error {
 		LastUpdated:  time.Now(),
 	}
 
+	// Track lock contention
+	lockStart := time.Now()
 	m.mu.Lock()
+	LockContentionDuration.Observe(time.Since(lockStart).Seconds())
+
 	m.books[msg.AssetID] = snapshot
 	SnapshotsTracked.Set(float64(len(m.books)))
 	m.mu.Unlock()
@@ -128,6 +136,7 @@ func (m *Manager) handleBookMessage(msg *types.OrderbookMessage) error {
 	case m.updateChan <- snapshot:
 	default:
 		// Channel full, drop update
+		UpdatesDroppedTotal.WithLabelValues("channel_full").Inc()
 	}
 
 	return nil
@@ -158,7 +167,9 @@ func (m *Manager) handlePriceChangeMessage(msg *types.OrderbookMessage) error {
 	}
 
 	// Only hold lock for map access and update
+	lockStart := time.Now()
 	m.mu.Lock()
+	LockContentionDuration.Observe(time.Since(lockStart).Seconds())
 	defer m.mu.Unlock()
 
 	snapshot, exists := m.books[msg.AssetID]
@@ -192,6 +203,7 @@ func (m *Manager) handlePriceChangeMessage(msg *types.OrderbookMessage) error {
 	case m.updateChan <- &snapshotCopy:
 	default:
 		// Channel full, drop update
+		UpdatesDroppedTotal.WithLabelValues("channel_full").Inc()
 	}
 
 	return nil

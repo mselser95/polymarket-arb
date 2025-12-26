@@ -36,4 +36,25 @@ var (
 		Name: "polymarket_execution_errors_total",
 		Help: "Total number of execution errors",
 	})
+
+	// ExecutionErrorsByType tracks execution failures by error type.
+	ExecutionErrorsByType = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "polymarket_execution_errors_by_type_total",
+			Help: "Total number of execution errors classified by type",
+		},
+		[]string{"error_type"},
+	)
+
+	// OpportunitiesReceived tracks opportunities received for execution.
+	OpportunitiesReceived = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "polymarket_execution_opportunities_received_total",
+		Help: "Total number of arbitrage opportunities received for execution",
+	})
+
+	// OpportunitiesExecuted tracks successfully executed opportunities.
+	OpportunitiesExecuted = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "polymarket_execution_opportunities_executed_total",
+		Help: "Total number of opportunities successfully executed",
+	})
 )

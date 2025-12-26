@@ -114,13 +114,13 @@ func runBalance(cmd *cobra.Command, args []string) error {
 
 	allowanceFloat := new(big.Float).Quo(new(big.Float).SetInt(allowance), big.NewFloat(1e6))
 	if allowance.Cmp(big.NewInt(0).SetUint64(1e18)) > 0 {
-		fmt.Printf("USDC Allowance: Unlimited ✅\n")
+		fmt.Printf("USDC Allowance: Unlimited\n")
 	} else {
 		fmt.Printf("USDC Allowance: %s USDC\n", allowanceFloat.Text('f', 2))
 	}
 
-	// Show positions if requested
-	if showPositions && apiKey != "" {
+	// Show positions (no API key required for Data API)
+	if showPositions {
 		fmt.Printf("\n=== Active Positions ===\n\n")
 		positions, err := getPositions(apiKey, address.Hex())
 		if err != nil {
@@ -129,14 +129,29 @@ func runBalance(cmd *cobra.Command, args []string) error {
 			fmt.Printf("No active positions\n")
 		} else {
 			totalValue := 0.0
-			for _, pos := range positions {
-				fmt.Printf("Market: %s\n", pos.MarketSlug)
-				fmt.Printf("  Outcome: %s\n", pos.Outcome)
-				fmt.Printf("  Size: %.2f tokens\n", pos.Size)
-				fmt.Printf("  Value: $%.2f\n\n", pos.Value)
+			totalPnL := 0.0
+			for i, pos := range positions {
+				fmt.Printf("[%d] %s\n", i+1, pos.MarketSlug)
+				fmt.Printf("    Outcome: %s\n", pos.Outcome)
+				fmt.Printf("    Size: %.2f tokens\n", pos.Size)
+				fmt.Printf("    Entry Price: $%.4f | Current Price: $%.4f\n", pos.AvgPrice, pos.CurrentPrice)
+				fmt.Printf("    Initial Value: $%.2f | Current Value: $%.2f\n", pos.InitialValue, pos.Value)
+
+				pnlSign := ""
+				if pos.CashPnL > 0 {
+					pnlSign = "+"
+				}
+				fmt.Printf("    P&L: %s$%.2f (%.1f%%)\n\n", pnlSign, pos.CashPnL, pos.PercentPnL)
+
 				totalValue += pos.Value
+				totalPnL += pos.CashPnL
 			}
 			fmt.Printf("Total Position Value: $%.2f\n", totalValue)
+			pnlSign := ""
+			if totalPnL > 0 {
+				pnlSign = "+"
+			}
+			fmt.Printf("Total P&L: %s$%.2f\n", pnlSign, totalPnL)
 		}
 	}
 
@@ -224,14 +239,36 @@ func getUSDCAllowance(client *ethclient.Client, owner common.Address) (*big.Int,
 }
 
 type Position struct {
-	MarketSlug string
-	Outcome    string
-	Size       float64
-	Value      float64
+	MarketSlug    string
+	Outcome       string
+	Size          float64
+	Value         float64
+	AvgPrice      float64
+	CurrentPrice  float64
+	CashPnL       float64
+	PercentPnL    float64
+	InitialValue  float64
+}
+
+// DataAPIPosition represents the response from the Polymarket Data API.
+type DataAPIPosition struct {
+	Asset        string  `json:"asset"`
+	ConditionID  string  `json:"conditionId"`
+	Size         float64 `json:"size"`
+	AvgPrice     float64 `json:"avgPrice"`
+	InitialValue float64 `json:"initialValue"`
+	CurrentValue float64 `json:"currentValue"`
+	CashPnL      float64 `json:"cashPnl"`
+	PercentPnL   float64 `json:"percentPnl"`
+	CurPrice     float64 `json:"curPrice"`
+	Title        string  `json:"title"`
+	Slug         string  `json:"slug"`
+	Outcome      string  `json:"outcome"`
 }
 
 func getPositions(apiKey, address string) ([]Position, error) {
-	url := fmt.Sprintf("https://clob.polymarket.com/positions?user=%s", address)
+	// Use Data API endpoint (public, no auth required)
+	url := fmt.Sprintf("https://data-api.polymarket.com/positions?user=%s&sizeThreshold=0.01", address)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -251,28 +288,25 @@ func getPositions(apiKey, address string) ([]Position, error) {
 		return nil, fmt.Errorf("API error: status %d", resp.StatusCode)
 	}
 
-	var rawPositions []map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&rawPositions); err != nil {
+	var apiPositions []DataAPIPosition
+	if err := json.NewDecoder(resp.Body).Decode(&apiPositions); err != nil {
 		return nil, err
 	}
 
-	positions := make([]Position, 0)
-	for _, pos := range rawPositions {
-		if size, ok := pos["size"].(float64); ok && size > 0 {
+	positions := make([]Position, 0, len(apiPositions))
+	for _, pos := range apiPositions {
+		if pos.Size > 0 {
 			position := Position{
-				Size: size,
+				MarketSlug:   pos.Slug,
+				Outcome:      pos.Outcome,
+				Size:         pos.Size,
+				Value:        pos.CurrentValue,
+				AvgPrice:     pos.AvgPrice,
+				CurrentPrice: pos.CurPrice,
+				CashPnL:      pos.CashPnL,
+				PercentPnL:   pos.PercentPnL,
+				InitialValue: pos.InitialValue,
 			}
-
-			if market, ok := pos["market"].(string); ok {
-				position.MarketSlug = market
-			}
-			if outcome, ok := pos["outcome"].(string); ok {
-				position.Outcome = outcome
-			}
-			if value, ok := pos["value"].(float64); ok {
-				position.Value = value
-			}
-
 			positions = append(positions, position)
 		}
 	}

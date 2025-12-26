@@ -1,6 +1,7 @@
 package execution
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/hmac"
@@ -20,6 +21,8 @@ import (
 	"github.com/polymarket/go-order-utils/pkg/builder"
 	"github.com/polymarket/go-order-utils/pkg/model"
 	"go.uber.org/zap"
+
+	"github.com/mselser95/polymarket-arb/pkg/types"
 )
 
 // OrderClient handles order submission to Polymarket CLOB
@@ -79,45 +82,20 @@ func NewOrderClient(cfg *OrderClientConfig) (*OrderClient, error) {
 	}, nil
 }
 
-// SignedOrderJSON represents a signed order in JSON format
-type SignedOrderJSON struct {
-	Salt          int64  `json:"salt"`          // Integer, not string
-	Maker         string `json:"maker"`
-	Signer        string `json:"signer"`
-	Taker         string `json:"taker"`
-	TokenID       string `json:"tokenId"`
-	MakerAmount   string `json:"makerAmount"`
-	TakerAmount   string `json:"takerAmount"`
-	Side          string `json:"side"`
-	Expiration    string `json:"expiration"`
-	Nonce         string `json:"nonce"`
-	FeeRateBps    string `json:"feeRateBps"`
-	SignatureType int    `json:"signatureType"` // Integer, not string
-	Signature     string `json:"signature"`
-}
-
-// OrderResponse represents the API response for an order
-type OrderResponse struct {
-	OrderID      string  `json:"orderID"`
-	Status       string  `json:"status"`
-	TokenID      string  `json:"asset_id"`
-	Price        float64 `json:"price,string"`
-	Size         float64 `json:"original_size,string"`
-	SizeFilled   float64 `json:"size_matched,string"`
-	Side         string  `json:"side"`
-	CreatedAt    string  `json:"created_at"`
-	UpdatedAt    string  `json:"updated_at"`
-	OrderType    string  `json:"type"`
-	MarketID     string  `json:"market"`
-	Outcome      string  `json:"outcome"`
-	Owner        string  `json:"owner"`
-	MakerAddress string  `json:"maker_address"`
-	Message      string  `json:"message,omitempty"`
-	Error        string  `json:"error,omitempty"`
-}
-
-// PlaceOrders places YES and NO orders for arbitrage
-func (c *OrderClient) PlaceOrders(ctx context.Context, yesTokenID, noTokenID string, size, yesPrice, noPrice, yesTickSize, yesMinSize, noTickSize, noMinSize float64) (*OrderResponse, *OrderResponse, error) {
+// PlaceOrders places YES and NO orders for arbitrage (legacy sequential method).
+// DEPRECATED: Use PlaceOrdersBatch for better atomicity and performance.
+func (c *OrderClient) PlaceOrders(
+	ctx context.Context,
+	yesTokenID string,
+	noTokenID string,
+	size float64,
+	yesPrice float64,
+	noPrice float64,
+	yesTickSize float64,
+	yesMinSize float64,
+	noTickSize float64,
+	noMinSize float64,
+) (yesResp *types.OrderSubmissionResponse, noResp *types.OrderSubmissionResponse, err error) {
 	// Determine maker address
 	makerAddress := c.address
 	signerAddress := c.address
@@ -195,29 +173,172 @@ func (c *OrderClient) PlaceOrders(ctx context.Context, yesTokenID, noTokenID str
 		zap.Float64("size", size))
 
 	// Submit orders
-	yesResp, err := c.submitOrder(ctx, yesSignedOrder)
+	yesResp, err = c.submitOrder(ctx, yesSignedOrder)
 	if err != nil {
-		return nil, nil, fmt.Errorf("submit YES order: %w", err)
+		err = fmt.Errorf("submit YES order: %w", err)
+		return yesResp, noResp, err
 	}
 
-	noResp, err := c.submitOrder(ctx, noSignedOrder)
+	noResp, err = c.submitOrder(ctx, noSignedOrder)
 	if err != nil {
-		return yesResp, nil, fmt.Errorf("submit NO order: %w", err)
+		err = fmt.Errorf("submit NO order: %w", err)
+		return yesResp, noResp, err
 	}
 
 	return yesResp, noResp, nil
 }
 
-func (c *OrderClient) submitOrder(ctx context.Context, order *model.SignedOrder) (*OrderResponse, error) {
-	// Convert Side to string ("BUY" or "SELL")
+// PlaceOrdersBatch places YES and NO orders atomically using the batch endpoint.
+// This is the preferred method as it submits both orders in a single API call.
+func (c *OrderClient) PlaceOrdersBatch(
+	ctx context.Context,
+	yesTokenID string,
+	noTokenID string,
+	size float64,
+	yesPrice float64,
+	noPrice float64,
+	yesTickSize float64,
+	yesMinSize float64,
+	noTickSize float64,
+	noMinSize float64,
+) (yesResp *types.OrderSubmissionResponse, noResp *types.OrderSubmissionResponse, err error) {
+	// Determine maker address
+	makerAddress := c.address
+	signerAddress := c.address
+	if c.proxyAddress != "" {
+		makerAddress = c.proxyAddress
+	}
+
+	// Get rounding precision for each token
+	yesSizePrecision, yesAmountPrecision := getRoundingConfig(yesTickSize)
+	noSizePrecision, noAmountPrecision := getRoundingConfig(noTickSize)
+
+	// Calculate token sizes with rounding
+	yesTakerTokens := roundAmount(size/yesPrice, yesSizePrecision)
+	noTakerTokens := roundAmount(size/noPrice, noSizePrecision)
+
+	// Validate against minimums
+	if yesTakerTokens < yesMinSize {
+		err = fmt.Errorf("YES order size %.2f below minimum %.2f tokens", yesTakerTokens, yesMinSize)
+		return yesResp, noResp, err
+	}
+	if noTakerTokens < noMinSize {
+		err = fmt.Errorf("NO order size %.2f below minimum %.2f tokens", noTakerTokens, noMinSize)
+		return yesResp, noResp, err
+	}
+
+	// Build YES order with rounded amounts
+	yesMakerUSD := roundAmount(yesTakerTokens*yesPrice, yesAmountPrecision)
+	yesMakerAmount := usdToRawAmount(yesMakerUSD)
+	yesTakerAmount := usdToRawAmount(yesTakerTokens)
+
+	yesOrderData := &model.OrderData{
+		Maker:         makerAddress,
+		Taker:         "0x0000000000000000000000000000000000000000",
+		TokenId:       yesTokenID,
+		MakerAmount:   yesMakerAmount,
+		TakerAmount:   yesTakerAmount,
+		Side:          model.BUY,
+		FeeRateBps:    "0",
+		Nonce:         "0",
+		Signer:        signerAddress,
+		Expiration:    "0",
+		SignatureType: c.signatureType,
+	}
+
+	yesSignedOrder, err := c.orderBuilder.BuildSignedOrder(c.privateKey, yesOrderData, model.CTFExchange)
+	if err != nil {
+		err = fmt.Errorf("build YES order: %w", err)
+		return yesResp, noResp, err
+	}
+
+	// Build NO order with rounded amounts
+	noMakerUSD := roundAmount(noTakerTokens*noPrice, noAmountPrecision)
+	noMakerAmount := usdToRawAmount(noMakerUSD)
+	noTakerAmount := usdToRawAmount(noTakerTokens)
+
+	noOrderData := &model.OrderData{
+		Maker:         makerAddress,
+		Taker:         "0x0000000000000000000000000000000000000000",
+		TokenId:       noTokenID,
+		MakerAmount:   noMakerAmount,
+		TakerAmount:   noTakerAmount,
+		Side:          model.BUY,
+		FeeRateBps:    "0",
+		Nonce:         "0",
+		Signer:        signerAddress,
+		Expiration:    "0",
+		SignatureType: c.signatureType,
+	}
+
+	noSignedOrder, err := c.orderBuilder.BuildSignedOrder(c.privateKey, noOrderData, model.CTFExchange)
+	if err != nil {
+		err = fmt.Errorf("build NO order: %w", err)
+		return yesResp, noResp, err
+	}
+
+	c.logger.Info("batch-orders-built",
+		zap.String("maker", makerAddress),
+		zap.String("signer", signerAddress),
+		zap.Float64("size", size))
+
+	// Convert signed orders to JSON format
+	yesOrderJSON := c.convertToOrderJSON(yesSignedOrder)
+	noOrderJSON := c.convertToOrderJSON(noSignedOrder)
+
+	// Create batch request
+	batchReq := types.BatchOrderRequest{
+		{Order: yesOrderJSON, Owner: c.apiKey, OrderType: "GTC"},
+		{Order: noOrderJSON, Owner: c.apiKey, OrderType: "GTC"},
+	}
+
+	// Submit batch
+	batchResp, err := c.submitBatchOrder(ctx, batchReq)
+	if err != nil {
+		return yesResp, noResp, err
+	}
+
+	// Validate we got 2 responses
+	if len(batchResp) != 2 {
+		err = fmt.Errorf("expected 2 responses, got %d", len(batchResp))
+		return yesResp, noResp, err
+	}
+
+	yesResp = &batchResp[0]
+	noResp = &batchResp[1]
+
+	// Check for errors
+	if !yesResp.Success {
+		err = &types.OrderError{
+			Code:    yesResp.ErrorMsg,
+			Message: yesResp.ErrorMsg,
+			OrderID: yesResp.OrderID,
+			Side:    "YES",
+		}
+		return yesResp, noResp, err
+	}
+	if !noResp.Success {
+		err = &types.OrderError{
+			Code:    noResp.ErrorMsg,
+			Message: noResp.ErrorMsg,
+			OrderID: noResp.OrderID,
+			Side:    "NO",
+		}
+		return yesResp, noResp, err
+	}
+
+	return yesResp, noResp, nil
+}
+
+// convertToOrderJSON converts a signed order to JSON format
+func (c *OrderClient) convertToOrderJSON(order *model.SignedOrder) types.SignedOrderJSON {
 	sideStr := "BUY"
 	if order.Side.Uint64() == uint64(model.SELL) {
 		sideStr = "SELL"
 	}
 
-	// Convert to JSON format
-	jsonOrder := SignedOrderJSON{
-		Salt:          order.Salt.Int64(),                      // Integer
+	return types.SignedOrderJSON{
+		Salt:          order.Salt.Int64(),
 		Maker:         order.Maker.Hex(),
 		Signer:        order.Signer.Hex(),
 		Taker:         order.Taker.Hex(),
@@ -228,21 +349,103 @@ func (c *OrderClient) submitOrder(ctx context.Context, order *model.SignedOrder)
 		Expiration:    order.Expiration.String(),
 		Nonce:         order.Nonce.String(),
 		FeeRateBps:    order.FeeRateBps.String(),
-		SignatureType: int(order.SignatureType.Int64()),        // Integer
+		SignatureType: int(order.SignatureType.Int64()),
 		Signature:     "0x" + common.Bytes2Hex(order.Signature),
 	}
+}
+
+// submitBatchOrder submits a batch of orders to POST /orders endpoint
+func (c *OrderClient) submitBatchOrder(
+	ctx context.Context,
+	req types.BatchOrderRequest,
+) (resp types.BatchOrderResponse, err error) {
+	reqBody, err := json.Marshal(req)
+	if err != nil {
+		err = fmt.Errorf("marshal batch request: %w", err)
+		return resp, err
+	}
+
+	// Create HMAC signature
+	timestamp := fmt.Sprintf("%d", time.Now().Unix())
+	method := "POST"
+	requestPath := "/orders" // Note: plural for batch endpoint
+
+	signaturePayload := timestamp + method + requestPath + string(reqBody)
+
+	// Decode secret using URL-safe base64
+	secretBytes, err := base64.URLEncoding.DecodeString(c.secret)
+	if err != nil {
+		err = fmt.Errorf("decode secret: %w", err)
+		return resp, err
+	}
+
+	h := hmac.New(sha256.New, secretBytes)
+	h.Write([]byte(signaturePayload))
+	signature := base64.URLEncoding.EncodeToString(h.Sum(nil))
+
+	// Make request
+	url := "https://clob.polymarket.com" + requestPath
+	httpReq, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(reqBody))
+	if err != nil {
+		err = fmt.Errorf("create request: %w", err)
+		return resp, err
+	}
+
+	// Set headers (same as single order)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("POLY_API_KEY", c.apiKey)
+	httpReq.Header.Set("POLY_SIGNATURE", signature)
+	httpReq.Header.Set("POLY_TIMESTAMP", timestamp)
+	httpReq.Header.Set("POLY_PASSPHRASE", c.passphrase)
+	httpReq.Header.Set("POLY_ADDRESS", c.address)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	httpResp, err := client.Do(httpReq)
+	if err != nil {
+		err = fmt.Errorf("send request: %w", err)
+		return resp, err
+	}
+	defer httpResp.Body.Close()
+
+	body, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		err = fmt.Errorf("read response: %w", err)
+		return resp, err
+	}
+
+	if httpResp.StatusCode != http.StatusOK && httpResp.StatusCode != http.StatusCreated {
+		err = fmt.Errorf("API error (status %d): %s", httpResp.StatusCode, string(body))
+		return resp, err
+	}
+
+	err = json.Unmarshal(body, &resp)
+	if err != nil {
+		err = fmt.Errorf("parse batch response: %w\nBody: %s", err, string(body))
+		return resp, err
+	}
+
+	return resp, nil
+}
+
+func (c *OrderClient) submitOrder(
+	ctx context.Context,
+	order *model.SignedOrder,
+) (resp *types.OrderSubmissionResponse, err error) {
+	// Convert to JSON format using helper method
+	jsonOrder := c.convertToOrderJSON(order)
 
 	// Wrap order in the required structure
 	// Note: "owner" is the API key, not the maker address (per Python client)
-	orderRequest := map[string]interface{}{
-		"order":     jsonOrder,
-		"owner":     c.apiKey,
-		"orderType": "GTC",
+	orderRequest := types.OrderSubmissionRequest{
+		Order:     jsonOrder,
+		Owner:     c.apiKey,
+		OrderType: "GTC",
 	}
 
 	reqBody, err := json.Marshal(orderRequest)
 	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
+		err = fmt.Errorf("marshal request: %w", err)
+		return resp, err
 	}
 
 	// Create HMAC signature
@@ -255,7 +458,8 @@ func (c *OrderClient) submitOrder(ctx context.Context, order *model.SignedOrder)
 	// Decode secret using URL-safe base64 (Python client uses urlsafe_b64decode)
 	secretBytes, err := base64.URLEncoding.DecodeString(c.secret)
 	if err != nil {
-		return nil, fmt.Errorf("decode secret: %w", err)
+		err = fmt.Errorf("decode secret: %w", err)
+		return resp, err
 	}
 
 	h := hmac.New(sha256.New, secretBytes)
@@ -267,7 +471,8 @@ func (c *OrderClient) submitOrder(ctx context.Context, order *model.SignedOrder)
 	url := "https://clob.polymarket.com" + requestPath
 	req, err := http.NewRequestWithContext(ctx, method, url, strings.NewReader(string(reqBody)))
 	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+		err = fmt.Errorf("create request: %w", err)
+		return resp, err
 	}
 
 	// POLY_ADDRESS header should be the EOA address (per Python client: signer.address())
@@ -279,27 +484,31 @@ func (c *OrderClient) submitOrder(ctx context.Context, order *model.SignedOrder)
 	req.Header.Set("POLY_ADDRESS", c.address) // EOA address from private key
 
 	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	httpResp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("send request: %w", err)
+		err = fmt.Errorf("send request: %w", err)
+		return resp, err
 	}
-	defer resp.Body.Close()
+	defer httpResp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(httpResp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
+		err = fmt.Errorf("read response: %w", err)
+		return resp, err
 	}
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return nil, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
+	if httpResp.StatusCode != http.StatusOK && httpResp.StatusCode != http.StatusCreated {
+		err = fmt.Errorf("API error (status %d): %s", httpResp.StatusCode, string(body))
+		return resp, err
 	}
 
-	var orderResp OrderResponse
-	if err := json.Unmarshal(body, &orderResp); err != nil {
-		return nil, fmt.Errorf("parse response: %w", err)
+	err = json.Unmarshal(body, &resp)
+	if err != nil {
+		err = fmt.Errorf("parse response: %w", err)
+		return resp, err
 	}
 
-	return &orderResp, nil
+	return resp, nil
 }
 
 func usdToRawAmount(usd float64) string {

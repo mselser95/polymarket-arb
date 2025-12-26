@@ -45,4 +45,20 @@ var (
 		Name: "polymarket_ws_subscription_count",
 		Help: "Number of active market subscriptions",
 	})
+
+	// MessagesDroppedTotal tracks messages dropped due to full channel.
+	MessagesDroppedTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "polymarket_ws_messages_dropped_total",
+			Help: "Total number of WebSocket messages dropped due to channel full",
+		},
+		[]string{"reason"},
+	)
+
+	// ConnectionDuration tracks WebSocket connection lifetime.
+	ConnectionDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "polymarket_ws_connection_duration_seconds",
+		Help:    "Duration of WebSocket connections before disconnect",
+		Buckets: []float64{60, 300, 600, 1800, 3600, 7200, 14400, 28800, 43200, 86400},
+	})
 )

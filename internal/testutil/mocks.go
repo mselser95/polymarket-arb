@@ -3,12 +3,15 @@ package testutil
 import (
 	"context"
 	"encoding/json"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/mselser95/polymarket-arb/internal/arbitrage"
 	"github.com/mselser95/polymarket-arb/pkg/types"
+	"github.com/mselser95/polymarket-arb/pkg/wallet"
 )
 
 // MockGammaAPI is a mock HTTP server that simulates the Polymarket Gamma API.
@@ -178,4 +181,117 @@ func (m *MockWebSocket) GetSubscriptions() []string {
 // Close closes the mock WebSocket.
 func (m *MockWebSocket) Close() {
 	close(m.Messages)
+}
+
+// MockWalletClient is a mock implementation of wallet.Client for testing.
+type MockWalletClient struct {
+	mu             sync.Mutex
+	balances       *wallet.Balances
+	positions      []*wallet.Position
+	getBalancesErr error
+	getPositionsErr error
+}
+
+// NewMockWalletClient creates a new mock wallet client.
+func NewMockWalletClient() (client *MockWalletClient) {
+	return &MockWalletClient{
+		balances: &wallet.Balances{
+			MATIC:         big.NewInt(0),
+			USDC:          big.NewInt(0),
+			USDCAllowance: big.NewInt(0),
+		},
+		positions: make([]*wallet.Position, 0),
+	}
+}
+
+// GetBalances returns the configured mock balances.
+func (m *MockWalletClient) GetBalances(ctx context.Context, address common.Address) (balances *wallet.Balances, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.getBalancesErr != nil {
+		return nil, m.getBalancesErr
+	}
+
+	// Return a copy to avoid race conditions
+	return &wallet.Balances{
+		MATIC:         new(big.Int).Set(m.balances.MATIC),
+		USDC:          new(big.Int).Set(m.balances.USDC),
+		USDCAllowance: new(big.Int).Set(m.balances.USDCAllowance),
+	}, nil
+}
+
+// GetPositions returns the configured mock positions.
+func (m *MockWalletClient) GetPositions(ctx context.Context, address common.Address) (positions []*wallet.Position, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.getPositionsErr != nil {
+		return nil, m.getPositionsErr
+	}
+
+	// Return a copy to avoid race conditions
+	result := make([]*wallet.Position, len(m.positions))
+	copy(result, m.positions)
+	return result, nil
+}
+
+// SetBalances sets the mock balances that will be returned.
+func (m *MockWalletClient) SetBalances(matic, usdc, allowance *big.Int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.balances = &wallet.Balances{
+		MATIC:         matic,
+		USDC:          usdc,
+		USDCAllowance: allowance,
+	}
+}
+
+// SetUSDCBalance sets only the USDC balance (convenience method).
+func (m *MockWalletClient) SetUSDCBalance(usdc *big.Int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.balances.USDC = usdc
+}
+
+// SetPositions sets the mock positions that will be returned.
+func (m *MockWalletClient) SetPositions(positions []*wallet.Position) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.positions = positions
+}
+
+// SetGetBalancesError sets an error to be returned by GetBalances.
+func (m *MockWalletClient) SetGetBalancesError(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.getBalancesErr = err
+}
+
+// SetGetPositionsError sets an error to be returned by GetPositions.
+func (m *MockWalletClient) SetGetPositionsError(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.getPositionsErr = err
+}
+
+// ResetErrors clears all error states.
+func (m *MockWalletClient) ResetErrors() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.getBalancesErr = nil
+	m.getPositionsErr = nil
+}
+
+// NewUSDCBigInt is a helper to create a *big.Int representing USDC amount.
+// USDC has 6 decimals, so 1000000 = $1.00
+func NewUSDCBigInt(dollars float64) (amount *big.Int) {
+	usdcUnits := int64(dollars * 1e6)
+	return big.NewInt(usdcUnits)
 }

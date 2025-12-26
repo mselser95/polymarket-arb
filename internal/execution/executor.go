@@ -3,6 +3,7 @@ package execution
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -68,6 +69,9 @@ func (e *Executor) executionLoop() {
 				return
 			}
 
+			// Track opportunity received
+			OpportunitiesReceived.Inc()
+
 			start := time.Now()
 			result := e.execute(opp)
 			ExecutionDurationSeconds.Observe(time.Since(start).Seconds())
@@ -76,8 +80,15 @@ func (e *Executor) executionLoop() {
 				e.logger.Error("execution-failed",
 					zap.String("opportunity-id", opp.ID),
 					zap.Error(result.Error))
+
+				// Classify error type
+				errorType := classifyError(result.Error)
 				ExecutionErrorsTotal.Inc()
+				ExecutionErrorsByType.WithLabelValues(errorType).Inc()
 			} else {
+				// Track successful execution
+				OpportunitiesExecuted.Inc()
+
 				e.logger.Info("execution-successful",
 					zap.String("opportunity-id", opp.ID),
 					zap.String("market-slug", opp.MarketSlug),
@@ -201,11 +212,11 @@ func (e *Executor) executeLive(opp *arbitrage.Opportunity) *types.ExecutionResul
 		zap.Float64("no-price", opp.NoAskPrice),
 		zap.Float64("size", opp.MaxTradeSize))
 
-	// Place orders
+	// Place orders using batch endpoint for atomic submission
 	ctx, cancel := context.WithTimeout(e.ctx, 30*time.Second)
 	defer cancel()
 
-	yesResp, noResp, err := e.orderClient.PlaceOrders(
+	yesResp, noResp, err := e.orderClient.PlaceOrdersBatch(
 		ctx,
 		yesTokenID,
 		noTokenID,
@@ -219,8 +230,22 @@ func (e *Executor) executeLive(opp *arbitrage.Opportunity) *types.ExecutionResul
 	)
 
 	if err != nil {
+		// Log detailed error information
+		errorMsg := err.Error()
+		if yesResp != nil && !yesResp.Success {
+			errorMsg = fmt.Sprintf("YES: %s", yesResp.ErrorMsg)
+		}
+		if noResp != nil && !noResp.Success {
+			if yesResp != nil && !yesResp.Success {
+				errorMsg = fmt.Sprintf("YES: %s, NO: %s", yesResp.ErrorMsg, noResp.ErrorMsg)
+			} else {
+				errorMsg = fmt.Sprintf("NO: %s", noResp.ErrorMsg)
+			}
+		}
+
 		e.logger.Error("order-placement-failed",
 			zap.String("opportunity-id", opp.ID),
+			zap.String("error-msg", errorMsg),
 			zap.Error(err))
 
 		ExecutionErrorsTotal.Inc()
@@ -234,20 +259,50 @@ func (e *Executor) executeLive(opp *arbitrage.Opportunity) *types.ExecutionResul
 		}
 	}
 
-	// Create trade records
+	// Verify both orders succeeded
+	if !yesResp.Success {
+		e.logger.Error("yes-order-failed",
+			zap.String("opportunity-id", opp.ID),
+			zap.String("error-msg", yesResp.ErrorMsg))
+		ExecutionErrorsTotal.Inc()
+		return &types.ExecutionResult{
+			OpportunityID: opp.ID,
+			MarketSlug:    opp.MarketSlug,
+			ExecutedAt:    now,
+			Success:       false,
+			Error:         fmt.Errorf("YES order failed: %s", yesResp.ErrorMsg),
+		}
+	}
+
+	if !noResp.Success {
+		e.logger.Error("no-order-failed",
+			zap.String("opportunity-id", opp.ID),
+			zap.String("error-msg", noResp.ErrorMsg))
+		ExecutionErrorsTotal.Inc()
+		return &types.ExecutionResult{
+			OpportunityID: opp.ID,
+			MarketSlug:    opp.MarketSlug,
+			ExecutedAt:    now,
+			Success:       false,
+			Error:         fmt.Errorf("NO order failed: %s", noResp.ErrorMsg),
+		}
+	}
+
+	// Create trade records using opportunity data
+	// Note: OrderSubmissionResponse doesn't include price/size, so we use the opportunity values
 	yesTrade := &types.Trade{
 		Outcome:   "YES",
 		Side:      "BUY",
-		Price:     yesResp.Price,
-		Size:      yesResp.Size,
+		Price:     opp.YesAskPrice,     // Use opportunity price
+		Size:      opp.MaxTradeSize,    // Use opportunity size
 		Timestamp: now,
 	}
 
 	noTrade := &types.Trade{
 		Outcome:   "NO",
 		Side:      "BUY",
-		Price:     noResp.Price,
-		Size:      noResp.Size,
+		Price:     opp.NoAskPrice,      // Use opportunity price
+		Size:      opp.MaxTradeSize,    // Use opportunity size
 		Timestamp: now,
 	}
 
@@ -268,9 +323,11 @@ func (e *Executor) executeLive(opp *arbitrage.Opportunity) *types.ExecutionResul
 	e.logger.Info("live-trade-executed",
 		zap.String("market-slug", opp.MarketSlug),
 		zap.String("yes-order-id", yesResp.OrderID),
+		zap.String("yes-status", yesResp.Status),
 		zap.String("no-order-id", noResp.OrderID),
-		zap.Float64("yes-price", yesResp.Price),
-		zap.Float64("no-price", noResp.Price),
+		zap.String("no-status", noResp.Status),
+		zap.Float64("yes-price", opp.YesAskPrice),
+		zap.Float64("no-price", opp.NoAskPrice),
 		zap.Float64("size", opp.MaxTradeSize),
 		zap.Int("profit-bps", opp.ProfitBPS),
 		zap.Float64("profit-usd", realizedProfit),
@@ -302,4 +359,49 @@ func (e *Executor) Close() error {
 		zap.String("mode", e.mode))
 
 	return nil
+}
+
+// classifyError classifies an execution error by type.
+func classifyError(err error) string {
+	if err == nil {
+		return "unknown"
+	}
+
+	errMsg := strings.ToLower(err.Error())
+
+	// Network errors
+	if strings.Contains(errMsg, "connection refused") ||
+		strings.Contains(errMsg, "timeout") ||
+		strings.Contains(errMsg, "dial") ||
+		strings.Contains(errMsg, "eof") ||
+		strings.Contains(errMsg, "network") {
+		return "network"
+	}
+
+	// API/validation errors
+	if strings.Contains(errMsg, "api error") ||
+		strings.Contains(errMsg, "invalid") ||
+		strings.Contains(errMsg, "bad request") ||
+		strings.Contains(errMsg, "400") ||
+		strings.Contains(errMsg, "403") ||
+		strings.Contains(errMsg, "404") ||
+		strings.Contains(errMsg, "500") {
+		return "api"
+	}
+
+	// Validation errors (client-side)
+	if strings.Contains(errMsg, "missing") ||
+		strings.Contains(errMsg, "required") ||
+		strings.Contains(errMsg, "not configured") {
+		return "validation"
+	}
+
+	// Insufficient funds
+	if strings.Contains(errMsg, "insufficient") ||
+		strings.Contains(errMsg, "balance") ||
+		strings.Contains(errMsg, "funds") {
+		return "funds"
+	}
+
+	return "unknown"
 }

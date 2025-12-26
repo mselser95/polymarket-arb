@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"sync/atomic"
 	"time"
 
 	"github.com/dgraph-io/ristretto"
@@ -9,8 +10,10 @@ import (
 
 // RistrettoCache is a cache implementation using Ristretto.
 type RistrettoCache struct {
-	cache  *ristretto.Cache
-	logger *zap.Logger
+	cache      *ristretto.Cache
+	logger     *zap.Logger
+	totalHits  atomic.Uint64
+	totalCalls atomic.Uint64
 }
 
 // RistrettoConfig holds configuration for Ristretto cache.
@@ -41,21 +44,38 @@ func NewRistrettoCache(cfg *RistrettoConfig) (Cache, error) {
 
 // Get retrieves a value from the cache.
 func (r *RistrettoCache) Get(key string) (interface{}, bool) {
+	start := time.Now()
 	value, found := r.cache.Get(key)
+	CacheOperationDuration.WithLabelValues("get").Observe(time.Since(start).Seconds())
+
+	r.totalCalls.Add(1)
 	if found {
+		r.totalHits.Add(1)
 		CacheHitsTotal.Inc()
 		r.logger.Debug("cache-hit", zap.String("key", key))
 	} else {
 		CacheMissesTotal.Inc()
 		r.logger.Debug("cache-miss", zap.String("key", key))
 	}
+
+	// Update hit rate gauge
+	calls := r.totalCalls.Load()
+	if calls > 0 {
+		hits := r.totalHits.Load()
+		hitRate := float64(hits) / float64(calls)
+		CacheHitRate.Set(hitRate)
+	}
+
 	return value, found
 }
 
 // Set stores a value in the cache with a TTL.
 func (r *RistrettoCache) Set(key string, value interface{}, ttl time.Duration) bool {
+	start := time.Now()
 	// Cost = 1 (we're counting items, not bytes)
 	success := r.cache.SetWithTTL(key, value, 1, ttl)
+	CacheOperationDuration.WithLabelValues("set").Observe(time.Since(start).Seconds())
+
 	if success {
 		CacheSetsTotal.Inc()
 		r.logger.Debug("cache-set",
@@ -67,7 +87,10 @@ func (r *RistrettoCache) Set(key string, value interface{}, ttl time.Duration) b
 
 // Delete removes a value from the cache.
 func (r *RistrettoCache) Delete(key string) {
+	start := time.Now()
 	r.cache.Del(key)
+	CacheOperationDuration.WithLabelValues("delete").Observe(time.Since(start).Seconds())
+
 	CacheDeletesTotal.Inc()
 	r.logger.Debug("cache-delete", zap.String("key", key))
 }

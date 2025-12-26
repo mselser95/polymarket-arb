@@ -15,19 +15,20 @@ import (
 
 // Manager manages a single WebSocket connection to Polymarket.
 type Manager struct {
-	url          string
-	conn         *websocket.Conn
-	logger       *zap.Logger
-	reconnectMgr *ReconnectManager
-	config       Config
-	messageChan  chan *types.OrderbookMessage
-	ctx          context.Context
-	cancel       context.CancelFunc
-	wg           sync.WaitGroup
-	mu           sync.RWMutex
-	subscribed   map[string]bool // tracks subscribed token IDs
-	connected    atomic.Bool
-	lastPongTime atomic.Int64
+	url              string
+	conn             *websocket.Conn
+	logger           *zap.Logger
+	reconnectMgr     *ReconnectManager
+	config           Config
+	messageChan      chan *types.OrderbookMessage
+	ctx              context.Context
+	cancel           context.CancelFunc
+	wg               sync.WaitGroup
+	mu               sync.RWMutex
+	subscribed       map[string]bool // tracks subscribed token IDs
+	connected        atomic.Bool
+	lastPongTime     atomic.Int64
+	connectionStart  atomic.Int64 // Unix timestamp of connection start
 }
 
 // Config holds WebSocket manager configuration.
@@ -108,8 +109,10 @@ func (m *Manager) connect(ctx context.Context) error {
 	m.conn = conn
 	m.mu.Unlock()
 
+	now := time.Now()
 	m.connected.Store(true)
-	m.lastPongTime.Store(time.Now().Unix())
+	m.lastPongTime.Store(now.Unix())
+	m.connectionStart.Store(now.Unix())
 	ActiveConnections.Set(1)
 
 	m.logger.Info("websocket-connected")
@@ -209,6 +212,14 @@ func (m *Manager) readLoop() {
 		_, message, err := conn.ReadMessage()
 		if err != nil {
 			m.logger.Warn("read-error", zap.Error(err))
+
+			// Observe connection duration before marking as disconnected
+			startTime := m.connectionStart.Load()
+			if startTime > 0 {
+				duration := time.Since(time.Unix(startTime, 0)).Seconds()
+				ConnectionDuration.Observe(duration)
+			}
+
 			m.connected.Store(false)
 			ActiveConnections.Set(0)
 			return
@@ -227,6 +238,7 @@ func (m *Manager) readLoop() {
 
 		// Process each message in the array
 		for i := range obMsgs {
+			start := time.Now()
 			obMsg := &obMsgs[i]
 
 			MessagesReceivedTotal.WithLabelValues(obMsg.EventType).Inc()
@@ -236,7 +248,11 @@ func (m *Manager) readLoop() {
 			case m.messageChan <- obMsg:
 			default:
 				m.logger.Warn("message-channel-full", zap.String("event-type", obMsg.EventType))
+				MessagesDroppedTotal.WithLabelValues("channel_full").Inc()
 			}
+
+			// Observe message processing latency
+			MessageLatencySeconds.Observe(time.Since(start).Seconds())
 		}
 	}
 }

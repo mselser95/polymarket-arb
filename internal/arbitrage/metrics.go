@@ -32,4 +32,27 @@ var (
 		Help:    "Duration of arbitrage detection loop",
 		Buckets: prometheus.DefBuckets,
 	})
+
+	// OpportunitiesRejectedTotal tracks rejected opportunities by reason.
+	OpportunitiesRejectedTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "polymarket_arb_opportunities_rejected_total",
+			Help: "Total number of arbitrage opportunities rejected",
+		},
+		[]string{"reason"},
+	)
+
+	// NetProfitBPS tracks net profit after fees in basis points.
+	NetProfitBPS = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "polymarket_arb_net_profit_bps",
+		Help:    "Arbitrage opportunity net profit after fees in basis points",
+		Buckets: []float64{10, 25, 50, 100, 200, 500, 1000, 2000, 5000},
+	})
+
+	// EndToEndLatencySeconds tracks orderbook update to opportunity detection latency.
+	EndToEndLatencySeconds = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "polymarket_arb_e2e_latency_seconds",
+		Help:    "End-to-end latency from orderbook update to opportunity detection",
+		Buckets: []float64{0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1},
+	})
 )
