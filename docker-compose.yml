@@ -35,7 +35,7 @@ services:
       - '--web.console.libraries=/usr/share/prometheus/console_libraries'
       - '--web.console.templates=/usr/share/prometheus/consoles'
     ports:
-      - "9090:9090"
+      - "9091:9090"
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
@@ -53,7 +53,7 @@ services:
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_SERVER_ROOT_URL=http://localhost:3000
     ports:
-      - "3000:3000"
+      - "3001:3000"
     volumes:
       - grafana_data:/var/lib/grafana
     depends_on:
@@ -183,7 +183,7 @@ services:
     env_file:
       - .env
     ports:
-      - "8082:8080"
+      - "8083:8080"
     networks:
       - polymarket-network
     restart: unless-stopped
