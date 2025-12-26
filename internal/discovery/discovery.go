@@ -13,38 +13,41 @@ import (
 
 // Service discovers new markets by polling the Gamma API.
 type Service struct {
-	client       *Client
-	cache        cache.Cache
-	pollInterval time.Duration
-	marketLimit  int
-	logger       *zap.Logger
-	subscribed   map[string]*types.MarketSubscription
-	mu           sync.RWMutex
-	newMarketsCh chan *types.Market
-	singleMarket string // For debugging: if set, only track this one market
+	client            *Client
+	cache             cache.Cache
+	pollInterval      time.Duration
+	marketLimit       int
+	maxMarketDuration time.Duration
+	logger            *zap.Logger
+	subscribed        map[string]*types.MarketSubscription
+	mu                sync.RWMutex
+	newMarketsCh      chan *types.Market
+	singleMarket      string // For debugging: if set, only track this one market
 }
 
 // Config holds discovery service configuration.
 type Config struct {
-	Client       *Client
-	Cache        cache.Cache
-	PollInterval time.Duration
-	MarketLimit  int
-	Logger       *zap.Logger
-	SingleMarket string // For debugging: slug of single market to track
+	Client            *Client
+	Cache             cache.Cache
+	PollInterval      time.Duration
+	MarketLimit       int
+	MaxMarketDuration time.Duration
+	Logger            *zap.Logger
+	SingleMarket      string // For debugging: slug of single market to track
 }
 
 // New creates a new discovery service.
 func New(cfg *Config) *Service {
 	return &Service{
-		client:       cfg.Client,
-		cache:        cfg.Cache,
-		pollInterval: cfg.PollInterval,
-		marketLimit:  cfg.MarketLimit,
-		logger:       cfg.Logger,
-		subscribed:   make(map[string]*types.MarketSubscription),
-		newMarketsCh: make(chan *types.Market, 100),
-		singleMarket: cfg.SingleMarket,
+		client:            cfg.Client,
+		cache:             cfg.Cache,
+		pollInterval:      cfg.PollInterval,
+		marketLimit:       cfg.MarketLimit,
+		maxMarketDuration: cfg.MaxMarketDuration,
+		logger:            cfg.Logger,
+		subscribed:        make(map[string]*types.MarketSubscription),
+		newMarketsCh:      make(chan *types.Market, 100),
+		singleMarket:      cfg.SingleMarket,
 	}
 }
 
@@ -71,7 +74,7 @@ func (s *Service) Run(ctx context.Context) error {
 			close(s.newMarketsCh)
 			return ctx.Err()
 		case <-ticker.C:
-			err := s.poll(ctx)
+			err = s.poll(ctx)
 			if err != nil {
 				s.logger.Error("poll-failed", zap.Error(err))
 			}
@@ -91,7 +94,7 @@ func (s *Service) poll(ctx context.Context) error {
 		return s.pollSingleMarket(ctx)
 	}
 
-	// Fetch active markets sorted by volume (most active first)
+	// Fetch active markets sorted by 24h volume (DESC) - most liquid markets first
 	resp, err := s.client.FetchActiveMarkets(ctx, s.marketLimit, 0, "volume24hr")
 	if err != nil {
 		PollErrorsTotal.Inc()
@@ -149,12 +152,19 @@ func (s *Service) pollSingleMarket(ctx context.Context) error {
 
 	MarketsDiscoveredTotal.Inc()
 
-	// Check if market has YES and NO tokens
-	yesToken := market.GetTokenByOutcome("YES")
-	noToken := market.GetTokenByOutcome("NO")
+	// Check if market has at least 2 outcomes (binary or multi-outcome)
+	if len(market.Tokens) < 2 {
+		return fmt.Errorf("market %q has insufficient outcomes (%d, need 2+)",
+			s.singleMarket, len(market.Tokens))
+	}
 
-	if yesToken == nil || noToken == nil {
-		return fmt.Errorf("market %q missing YES or NO token", s.singleMarket)
+	// Map all outcomes to OutcomeToken structs
+	outcomes := make([]types.OutcomeToken, len(market.Tokens))
+	for i, token := range market.Tokens {
+		outcomes[i] = types.OutcomeToken{
+			TokenID: token.TokenID,
+			Outcome: token.Outcome,
+		}
 	}
 
 	// Mark as subscribed
@@ -163,8 +173,7 @@ func (s *Service) pollSingleMarket(ctx context.Context) error {
 		MarketID:     market.ID,
 		MarketSlug:   market.Slug,
 		Question:     market.Question,
-		TokenIDYes:   yesToken.TokenID,
-		TokenIDNo:    noToken.TokenID,
+		Outcomes:     outcomes,
 		SubscribedAt: time.Now(),
 	}
 	s.mu.Unlock()
@@ -200,15 +209,47 @@ func (s *Service) identifyNewMarkets(markets []types.Market) []*types.Market {
 			continue
 		}
 
-		// Check if market is valid (has YES and NO tokens)
-		yesToken := market.GetTokenByOutcome("YES")
-		noToken := market.GetTokenByOutcome("NO")
-
-		if yesToken == nil || noToken == nil {
-			s.logger.Debug("skipping-market-missing-tokens",
+		// Check if market has at least 2 outcomes (binary or multi-outcome)
+		if len(market.Tokens) < 2 {
+			s.logger.Debug("skipping-market-insufficient-outcomes",
 				zap.String("market-id", market.ID),
-				zap.String("question", market.Question))
+				zap.String("question", market.Question),
+				zap.Int("outcome-count", len(market.Tokens)))
 			continue
+		}
+
+		// Filter by EndDate (only subscribe to markets expiring within threshold)
+		// If maxMarketDuration == 0, skip all duration checks (unlimited)
+		if !market.EndDate.IsZero() && s.maxMarketDuration > 0 {
+			timeUntilExpiry := time.Until(market.EndDate)
+
+			if timeUntilExpiry < 0 {
+				// Market already expired
+				s.logger.Debug("skipping-market-already-expired",
+					zap.String("slug", market.Slug),
+					zap.String("market-id", market.ID),
+					zap.Time("end-date", market.EndDate))
+				continue
+			}
+
+			if timeUntilExpiry > s.maxMarketDuration {
+				// Market expires too far in future
+				s.logger.Info("market filtered by duration",
+					zap.String("market", market.Slug),
+					zap.Duration("time_until_expiry", timeUntilExpiry),
+					zap.Duration("max_duration", s.maxMarketDuration))
+				MarketsFilteredByEndDateTotal.Inc()
+				continue
+			}
+		}
+
+		// Map all outcomes to OutcomeToken structs
+		outcomes := make([]types.OutcomeToken, len(market.Tokens))
+		for i, token := range market.Tokens {
+			outcomes[i] = types.OutcomeToken{
+				TokenID: token.TokenID,
+				Outcome: token.Outcome,
+			}
 		}
 
 		// Mark as subscribed
@@ -216,8 +257,7 @@ func (s *Service) identifyNewMarkets(markets []types.Market) []*types.Market {
 			MarketID:     market.ID,
 			MarketSlug:   market.Slug,
 			Question:     market.Question,
-			TokenIDYes:   yesToken.TokenID,
-			TokenIDNo:    noToken.TokenID,
+			Outcomes:     outcomes,
 			SubscribedAt: time.Now(),
 		}
 
@@ -278,4 +318,22 @@ func (s *Service) GetMarket(marketID string) *types.Market {
 	}
 
 	return market
+}
+
+// RemoveMarkets removes markets from the subscribed map.
+func (s *Service) RemoveMarkets(markets []*types.MarketSubscription) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, market := range markets {
+		delete(s.subscribed, market.MarketSlug)
+
+		// Also remove from cache if present
+		if s.cache != nil {
+			s.cache.Delete(market.MarketID)
+		}
+	}
+
+	s.logger.Info("markets-removed",
+		zap.Int("count", len(markets)))
 }

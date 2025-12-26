@@ -1,0 +1,374 @@
+{
+  "title": "Orderbook Processing & Throughput",
+  "tags": ["polymarket", "orderbook", "performance"],
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "5s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Orderbooks Tracked",
+      "type": "stat",
+      "gridPos": {"h": 6, "w": 6, "x": 0, "y": 0},
+      "targets": [
+        {
+          "expr": "polymarket_orderbook_snapshots_tracked{service=\"arb-bot\"}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "steps": [
+              {"value": 0, "color": "red"},
+              {"value": 10, "color": "yellow"},
+              {"value": 50, "color": "green"}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Orderbook Update Rate",
+      "type": "stat",
+      "gridPos": {"h": 6, "w": 6, "x": 6, "y": 0},
+      "targets": [
+        {
+          "expr": "sum(rate(polymarket_orderbook_updates_total{service=\"arb-bot\"}[1m]))",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 1,
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "steps": [
+              {"value": 0, "color": "red"},
+              {"value": 10, "color": "yellow"},
+              {"value": 100, "color": "green"}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "WebSocket Message Rate",
+      "type": "stat",
+      "gridPos": {"h": 6, "w": 6, "x": 12, "y": 0},
+      "targets": [
+        {
+          "expr": "sum(rate(polymarket_ws_messages_received_total{service=\"arb-bot\"}[1m]))",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 1,
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "steps": [
+              {"value": 0, "color": "red"},
+              {"value": 10, "color": "yellow"},
+              {"value": 100, "color": "green"}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Processing Latency (p99)",
+      "type": "stat",
+      "gridPos": {"h": 6, "w": 6, "x": 18, "y": 0},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, rate(polymarket_orderbook_update_processing_duration_seconds_bucket{service=\"arb-bot\"}[1m]))",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 6,
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "steps": [
+              {"value": 0, "color": "green"},
+              {"value": 0.001, "color": "yellow"},
+              {"value": 0.01, "color": "red"}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 5,
+      "title": "WebSocket Message Rate by Type",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 6},
+      "targets": [
+        {
+          "expr": "rate(polymarket_ws_messages_received_total{service=\"arb-bot\"}[1m])",
+          "legendFormat": "{{event_type}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 1,
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10
+          }
+        }
+      },
+      "options": {
+        "tooltip": {"mode": "multi"},
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]}
+      }
+    },
+    {
+      "id": 6,
+      "title": "Orderbook Update Rate by Type",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 6},
+      "targets": [
+        {
+          "expr": "rate(polymarket_orderbook_updates_total{service=\"arb-bot\"}[1m])",
+          "legendFormat": "{{event_type}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 1,
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10
+          }
+        }
+      },
+      "options": {
+        "tooltip": {"mode": "multi"},
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]}
+      }
+    },
+    {
+      "id": 7,
+      "title": "Processing Duration (p50/p99)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 14},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, rate(polymarket_orderbook_update_processing_duration_seconds_bucket{service=\"arb-bot\"}[1m]))",
+          "legendFormat": "p50 Processing",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(polymarket_orderbook_update_processing_duration_seconds_bucket{service=\"arb-bot\"}[1m]))",
+          "legendFormat": "p99 Processing",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 6,
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "lineInterpolation": "smooth",
+            "fillOpacity": 0
+          }
+        }
+      },
+      "options": {
+        "tooltip": {"mode": "multi"},
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]}
+      }
+    },
+    {
+      "id": 8,
+      "title": "End-to-End Latency (p99)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 14},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, rate(polymarket_arb_e2e_latency_seconds_bucket{service=\"arb-bot\"}[1m]))",
+          "legendFormat": "p99 E2E Latency",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 6,
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10
+          }
+        }
+      },
+      "options": {
+        "tooltip": {"mode": "single"},
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]}
+      }
+    },
+    {
+      "id": 9,
+      "title": "Messages Dropped/sec",
+      "type": "stat",
+      "gridPos": {"h": 6, "w": 6, "x": 0, "y": 22},
+      "targets": [
+        {
+          "expr": "sum(rate(polymarket_ws_messages_dropped_total{service=\"arb-bot\"}[5m]))",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 2,
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "steps": [
+              {"value": 0, "color": "green"},
+              {"value": 0.01, "color": "yellow"},
+              {"value": 1, "color": "red"}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 10,
+      "title": "Updates Dropped/sec",
+      "type": "stat",
+      "gridPos": {"h": 6, "w": 6, "x": 6, "y": 22},
+      "targets": [
+        {
+          "expr": "sum(rate(polymarket_orderbook_updates_dropped_total{service=\"arb-bot\"}[5m]))",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 2,
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "steps": [
+              {"value": 0, "color": "green"},
+              {"value": 0.01, "color": "yellow"},
+              {"value": 1, "color": "red"}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 11,
+      "title": "Lock Contention (p99)",
+      "type": "stat",
+      "gridPos": {"h": 6, "w": 6, "x": 12, "y": 22},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, rate(polymarket_orderbook_lock_contention_seconds_bucket{service=\"arb-bot\"}[1m]))",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 6,
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "steps": [
+              {"value": 0, "color": "green"},
+              {"value": 0.0001, "color": "yellow"},
+              {"value": 0.001, "color": "red"}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 12,
+      "title": "Opportunities Detected/sec",
+      "type": "stat",
+      "gridPos": {"h": 6, "w": 6, "x": 18, "y": 22},
+      "targets": [
+        {
+          "expr": "rate(polymarket_arb_opportunities_detected_total{service=\"arb-bot\"}[1m])",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 3,
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "steps": [
+              {"value": 0, "color": "red"},
+              {"value": 0.001, "color": "yellow"},
+              {"value": 0.01, "color": "green"}
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "time": {
+    "from": "now-5m",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": ["5s", "10s", "30s", "1m", "5m"]
+  }
+}

@@ -24,29 +24,53 @@ func (a *App) handleNewMarkets() {
 }
 
 func (a *App) subscribeToMarket(market *types.Market) {
-	// Get YES and NO token IDs
-	yesToken := market.GetTokenByOutcome("YES")
-	noToken := market.GetTokenByOutcome("NO")
-
-	if yesToken == nil || noToken == nil {
-		a.logger.Warn("market-missing-tokens",
+	// Validate market has at least 2 outcomes
+	if len(market.Tokens) < 2 {
+		a.logger.Warn("market-has-insufficient-outcomes",
 			zap.String("market-id", market.ID),
-			zap.String("slug", market.Slug))
+			zap.String("slug", market.Slug),
+			zap.Int("outcome-count", len(market.Tokens)))
 		return
 	}
 
-	// Subscribe to both tokens
-	tokenIDs := []string{yesToken.TokenID, noToken.TokenID}
-	err := a.wsManager.Subscribe(a.ctx, tokenIDs)
+	// Subscribe to ALL outcome token IDs (supports both binary and multi-outcome markets)
+	tokenIDs := make([]string, 0, len(market.Tokens))
+	outcomeNames := make([]string, 0, len(market.Tokens))
+
+	for _, token := range market.Tokens {
+		if token.TokenID == "" {
+			a.logger.Warn("market-has-token-with-empty-id",
+				zap.String("market-id", market.ID),
+				zap.String("slug", market.Slug),
+				zap.String("outcome", token.Outcome))
+			continue
+		}
+		tokenIDs = append(tokenIDs, token.TokenID)
+		outcomeNames = append(outcomeNames, token.Outcome)
+	}
+
+	if len(tokenIDs) < 2 {
+		a.logger.Warn("market-has-insufficient-valid-tokens",
+			zap.String("market-id", market.ID),
+			zap.String("slug", market.Slug),
+			zap.Int("valid-token-count", len(tokenIDs)))
+		return
+	}
+
+	// Subscribe to all tokens via WebSocket
+	err := a.wsPool.Subscribe(a.ctx, tokenIDs)
 	if err != nil {
 		a.logger.Error("subscribe-failed",
 			zap.String("market-id", market.ID),
 			zap.String("slug", market.Slug),
+			zap.Strings("token-ids", tokenIDs),
 			zap.Error(err))
 		return
 	}
 
 	a.logger.Info("subscribed-to-market",
 		zap.String("slug", market.Slug),
-		zap.String("question", market.Question))
+		zap.String("question", market.Question),
+		zap.Int("outcome-count", len(tokenIDs)),
+		zap.Strings("outcomes", outcomeNames))
 }

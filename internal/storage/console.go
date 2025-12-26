@@ -24,27 +24,38 @@ func NewConsoleStorage(logger *zap.Logger) *ConsoleStorage {
 // StoreOpportunity pretty-prints an arbitrage opportunity to console.
 func (c *ConsoleStorage) StoreOpportunity(ctx context.Context, opp *arbitrage.Opportunity) error {
 	fmt.Println("\n" + "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	fmt.Printf("🎯 ARBITRAGE OPPORTUNITY DETECTED\n")
+	fmt.Printf("ARBITRAGE OPPORTUNITY DETECTED\n")
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	fmt.Printf("ID:       %s\n", opp.ID[:8])
 	fmt.Printf("Market:   %s\n", opp.MarketSlug)
 	fmt.Printf("Question: %s\n", opp.MarketQuestion)
 	fmt.Printf("Time:     %s\n", opp.DetectedAt.Format("2006-01-02 15:04:05"))
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	fmt.Printf("📊 PRICES\n")
-	fmt.Printf("  YES Bid:  %.4f @ %.2f size\n", opp.YesAskPrice, opp.YesAskSize)
-	fmt.Printf("  NO Bid:   %.4f @ %.2f size\n", opp.NoAskPrice, opp.NoAskSize)
-	fmt.Printf("  Sum:      %.4f (threshold: %.4f)\n", opp.PriceSum, opp.ConfigThreshold)
+	fmt.Printf("OUTCOMES (%d)\n", len(opp.Outcomes))
+
+	// Print each outcome with its price and size
+	for _, outcome := range opp.Outcomes {
+		fmt.Printf("  %-15s %.4f @ %.2f size\n",
+			outcome.Outcome+":",
+			outcome.AskPrice,
+			outcome.AskSize)
+	}
+
+	// Print summary
+	fmt.Printf("  ───────────────────────────────\n")
+	fmt.Printf("  Total Cost:     %.4f < %.4f (threshold)\n", opp.TotalPriceSum, opp.ConfigThreshold)
+	fmt.Printf("  Spread:         %.4f (%.2f bps)\n", 1.0-opp.TotalPriceSum, opp.ProfitMargin*10000)
+
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	fmt.Printf("💰 PROFIT ANALYSIS\n")
+	fmt.Printf("PROFIT ANALYSIS\n")
 	fmt.Printf("  Trade Size:      $%.2f\n", opp.MaxTradeSize)
 	fmt.Printf("  Gross Profit:    $%.2f (%d bps)\n", opp.EstimatedProfit, opp.ProfitBPS)
-	fmt.Printf("  Fees (1%%):       $%.2f\n", opp.TotalFees)
+	fmt.Printf("  Fees (%d outcomes): $%.2f\n", len(opp.Outcomes), opp.TotalFees)
 	fmt.Printf("  Net Profit:      $%.2f (%d bps)\n", opp.NetProfit, opp.NetProfitBPS)
 	if opp.NetProfit > 0 {
-		fmt.Printf("  ✅ PROFITABLE after fees!\n")
+		fmt.Printf("  ✓ PROFITABLE after fees!\n")
 	} else {
-		fmt.Printf("  ❌ NOT profitable after fees\n")
+		fmt.Printf("  ✗ NOT profitable after fees\n")
 	}
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 

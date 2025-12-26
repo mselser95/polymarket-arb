@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,6 +44,7 @@ Example:
 	RunE: runClosePositions,
 }
 
+//nolint:gochecknoglobals // Cobra flag variable
 var (
 	skipConfirmation bool
 )
@@ -55,12 +57,12 @@ func init() {
 
 // PositionToClose holds position data with market info for closing.
 type PositionToClose struct {
-	Position  wallet.Position
-	Market    *types.Market
-	TokenID   string
-	BidPrice  float64
-	TickSize  float64
-	MinSize   float64
+	Position wallet.Position
+	Market   *types.Market
+	TokenID  string
+	BidPrice float64
+	TickSize float64
+	MinSize  float64
 }
 
 // CloseResult holds the result of closing a single position.
@@ -80,7 +82,7 @@ func runClosePositions(cmd *cobra.Command, args []string) (err error) {
 	}
 
 	// Parse wallet address
-	address, privateKey, err := parseWalletCredentials()
+	address, err := parseWalletCredentials()
 	if err != nil {
 		return fmt.Errorf("parse credentials: %w", err)
 	}
@@ -107,25 +109,26 @@ func runClosePositions(cmd *cobra.Command, args []string) (err error) {
 	}
 
 	if len(positionsToClose) == 0 {
-		fmt.Printf("✅ No open positions to close.\n")
+		fmt.Printf("No open positions to close.\n")
 		return nil
 	}
 
 	// Step 2: Show confirmation
 	if !skipConfirmation {
-		confirmed, err := showConfirmationPrompt(positionsToClose)
+		var confirmed bool
+		confirmed, err = showConfirmationPrompt(positionsToClose)
 		if err != nil {
 			return fmt.Errorf("confirmation prompt: %w", err)
 		}
 		if !confirmed {
-			fmt.Printf("\n❌ Operation cancelled by user.\n")
+			fmt.Printf("\nOperation cancelled by user.\n")
 			return nil
 		}
 	}
 
 	// Step 3: Submit orders
 	fmt.Printf("\n=== Submitting Orders ===\n\n")
-	results, err := submitCloseOrders(ctx, positionsToClose, address, privateKey, logger)
+	results, err := submitCloseOrders(ctx, positionsToClose, address, logger)
 	if err != nil {
 		return fmt.Errorf("submit orders: %w", err)
 	}
@@ -137,25 +140,25 @@ func runClosePositions(cmd *cobra.Command, args []string) (err error) {
 }
 
 // parseWalletCredentials loads and parses wallet credentials from environment.
-func parseWalletCredentials() (address common.Address, privateKey *ecdsa.PrivateKey, err error) {
+func parseWalletCredentials() (address common.Address, err error) {
 	privateKeyHex := os.Getenv("POLYMARKET_PRIVATE_KEY")
 	if privateKeyHex == "" {
-		return common.Address{}, nil, errors.New("POLYMARKET_PRIVATE_KEY not set in .env")
+		return common.Address{}, errors.New("POLYMARKET_PRIVATE_KEY not set in .env")
 	}
 
-	privateKey, err = crypto.HexToECDSA(strings.TrimPrefix(privateKeyHex, "0x"))
+	privateKey, err := crypto.HexToECDSA(strings.TrimPrefix(privateKeyHex, "0x"))
 	if err != nil {
-		return common.Address{}, nil, fmt.Errorf("parse private key: %w", err)
+		return common.Address{}, fmt.Errorf("parse private key: %w", err)
 	}
 
 	publicKey := privateKey.Public()
 	publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
 	if !ok {
-		return common.Address{}, nil, errors.New("error casting public key to ECDSA")
+		return common.Address{}, errors.New("error casting public key to ECDSA")
 	}
 
 	address = crypto.PubkeyToAddress(*publicKeyECDSA)
-	return address, privateKey, nil
+	return address, nil
 }
 
 // createCloseLogger creates a logger for the close command.
@@ -202,15 +205,17 @@ func fetchPositionsToClose(
 	discoveryClient := discovery.NewClient(cfg.PolymarketGammaURL, logger)
 
 	// Create metadata client
-	metadataClient := markets.NewMetadataClient(cfg.PolymarketGammaURL, logger)
+	metadataClient := markets.NewMetadataClient()
 
 	// Enrich each position with market data
 	positionsToClose = make([]PositionToClose, 0, len(positions))
 
+	var enrichErr error
 	for _, pos := range positions {
-		ptc, err := enrichPosition(ctx, pos, discoveryClient, metadataClient)
-		if err != nil {
-			fmt.Printf("⚠️  Warning: Skipping %s (%s): %v\n", pos.MarketSlug, pos.Outcome, err)
+		var ptc PositionToClose
+		ptc, enrichErr = enrichPosition(ctx, pos, discoveryClient, metadataClient)
+		if enrichErr != nil {
+			fmt.Printf("Warning: Skipping %s (%s): %v\n", pos.MarketSlug, pos.Outcome, enrichErr)
 			continue
 		}
 		positionsToClose = append(positionsToClose, ptc)
@@ -239,13 +244,13 @@ func enrichPosition(
 	}
 
 	// Fetch token metadata
-	metadata, err := metadataClient.GetTokenMetadata(ctx, tokenID)
+	tickSize, minSize, err := metadataClient.FetchTokenMetadata(ctx, tokenID)
 	if err != nil {
-		return PositionToClose{}, fmt.Errorf("get metadata: %w", err)
+		return PositionToClose{}, fmt.Errorf("fetch metadata: %w", err)
 	}
 
 	// Fetch current bid price
-	bidPrice, err := discoveryClient.FetchMarketBidPrice(ctx, market.ConditionID, pos.Outcome)
+	bidPrice, err := discoveryClient.FetchTokenBidPrice(ctx, tokenID)
 	if err != nil {
 		return PositionToClose{}, fmt.Errorf("fetch bid price: %w", err)
 	}
@@ -255,12 +260,12 @@ func enrichPosition(
 	}
 
 	ptc = PositionToClose{
-		Position:  pos,
-		Market:    market,
-		TokenID:   tokenID,
-		BidPrice:  bidPrice,
-		TickSize:  metadata.MinimumTickSize,
-		MinSize:   metadata.MinimumOrderSize,
+		Position: pos,
+		Market:   market,
+		TokenID:  tokenID,
+		BidPrice: bidPrice,
+		TickSize: tickSize,
+		MinSize:  minSize,
 	}
 
 	return ptc, nil
@@ -295,7 +300,7 @@ func showConfirmationPrompt(positions []PositionToClose) (confirmed bool, err er
 
 	fmt.Printf("\nTotal positions: %d\n", len(positions))
 	fmt.Printf("Total estimated proceeds: $%.2f USDC\n", totalProceeds)
-	fmt.Printf("\n⚠️  This will place market sell orders. Proceed? [y/N]: ")
+	fmt.Printf("\nWARNING: This will place market sell orders. Proceed? [y/N]: ")
 
 	var response string
 	_, err = fmt.Scanln(&response)
@@ -312,13 +317,12 @@ func submitCloseOrders(
 	ctx context.Context,
 	positions []PositionToClose,
 	address common.Address,
-	privateKey *ecdsa.PrivateKey,
 	logger *zap.Logger,
 ) (results []CloseResult, err error) {
 	// Create order client
 	apiKey := os.Getenv("POLYMARKET_API_KEY")
 	secret := os.Getenv("POLYMARKET_SECRET")
-	passphrase := os.Getenv("POLYMARKET_API_PASSPHRASE")
+	passphrase := os.Getenv("POLYMARKET_PASSPHRASE")
 
 	if apiKey == "" || secret == "" || passphrase == "" {
 		return nil, errors.New("POLYMARKET_API_KEY, SECRET, and PASSPHRASE must be set")
@@ -329,13 +333,15 @@ func submitCloseOrders(
 		sigType = "0"
 	}
 
+	privateKeyHex := os.Getenv("POLYMARKET_PRIVATE_KEY")
+
 	orderClient, err := execution.NewOrderClient(&execution.OrderClientConfig{
 		APIKey:        apiKey,
 		Secret:        secret,
 		Passphrase:    passphrase,
-		PrivateKey:    privateKey,
-		Address:       address,
-		SignatureType: model.SignatureType(mustParseInt(sigType)),
+		PrivateKey:    privateKeyHex,
+		Address:       address.Hex(),
+		SignatureType: mustParseInt(sigType),
 		Logger:        logger,
 	})
 	if err != nil {
@@ -353,9 +359,9 @@ func submitCloseOrders(
 		results = append(results, result)
 
 		if result.Success {
-			fmt.Printf("  ✅ Order placed: %s\n", result.OrderID)
+			fmt.Printf("  ✓ Order placed: %s (≈$%.2f)\n", result.OrderID, result.USDReceived)
 		} else {
-			fmt.Printf("  ❌ Failed: %v\n", result.Error)
+			fmt.Printf("  ✗ Failed: %v\n", result.Error)
 		}
 	}
 
@@ -369,8 +375,9 @@ func submitSingleCloseOrder(
 	ptc PositionToClose,
 ) (result CloseResult) {
 	// Build sell order
-	usdcAmount := ptc.Position.Size * ptc.BidPrice * 1e6 // 6 decimals
-	tokenAmount := ptc.Position.Size
+	// For SELL: Maker gives outcome tokens, Taker gives USDC
+	tokenAmountRaw := ptc.Position.Size * 1e6                // Outcome tokens in raw units (6 decimals)
+	usdcAmountRaw := ptc.Position.Size * ptc.BidPrice * 1e6 // USDC in raw units (6 decimals)
 
 	// TODO: Round amounts using tick size and min size
 	// For now, using raw amounts
@@ -378,19 +385,22 @@ func submitSingleCloseOrder(
 	orderData := model.OrderData{
 		Maker:         orderClient.GetMakerAddress(),
 		Taker:         "0x0000000000000000000000000000000000000000",
-		TokenID:       ptc.TokenID,
-		MakerAmount:   fmt.Sprintf("%.0f", usdcAmount),
-		TakerAmount:   fmt.Sprintf("%.0f", tokenAmount*1e6), // Assuming 6 decimals
+		TokenId:       ptc.TokenID,
+		MakerAmount:   fmt.Sprintf("%.0f", tokenAmountRaw), // Tokens to sell
+		TakerAmount:   fmt.Sprintf("%.0f", usdcAmountRaw),  // USDC to receive
 		Side:          model.SELL,
 		FeeRateBps:    "0",
 		Nonce:         "0",
-		Signer:        orderClient.GetSignerAddress().Hex(),
+		Signer:        orderClient.GetSignerAddress(),
 		Expiration:    "0",
 		SignatureType: orderClient.GetSignatureType(),
 	}
 
+	// Show order details
+	fmt.Printf("  Selling %.2f tokens @ $%.4f\n", ptc.Position.Size, ptc.BidPrice)
+
 	// Place order
-	resp, err := orderClient.PlaceOrder(ctx, orderData)
+	resp, err := orderClient.PlaceSingleOrder(ctx, &orderData)
 	if err != nil {
 		return CloseResult{
 			Position: ptc.Position,
@@ -420,8 +430,10 @@ func reportResults(results []CloseResult) {
 		if r.Success {
 			successCount++
 			totalUSD += r.USDReceived
-			fmt.Printf("✅ %s (%s) - %.2f tokens sold ≈ $%.2f received\n",
-				r.Position.MarketSlug, r.Position.Outcome, r.Position.Size, r.USDReceived)
+			avgPrice := r.USDReceived / r.Position.Size
+			fmt.Printf("✓ %s (%s)\n", r.Position.MarketSlug, r.Position.Outcome)
+			fmt.Printf("  %.2f tokens @ $%.4f = $%.2f received\n",
+				r.Position.Size, avgPrice, r.USDReceived)
 		}
 	}
 
@@ -429,7 +441,7 @@ func reportResults(results []CloseResult) {
 		fmt.Printf("\nFailed:\n")
 		for _, r := range results {
 			if !r.Success {
-				fmt.Printf("❌ %s (%s) - Error: %v\n",
+				fmt.Printf("✗ %s (%s) - Error: %v\n",
 					r.Position.MarketSlug, r.Position.Outcome, r.Error)
 			}
 		}
@@ -444,8 +456,11 @@ func reportResults(results []CloseResult) {
 	}
 }
 
-func mustParseInt(s string) int {
-	var i int
-	fmt.Sscanf(s, "%d", &i)
-	return i
+func mustParseInt(s string) (result int) {
+	var err error
+	result, err = strconv.Atoi(s)
+	if err != nil {
+		return 0
+	}
+	return result
 }

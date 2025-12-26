@@ -2,7 +2,6 @@ package arbitrage
 
 import (
 	"context"
-	"math"
 	"sync"
 	"time"
 
@@ -37,6 +36,7 @@ type Detector struct {
 type Config struct {
 	Threshold    float64
 	MinTradeSize float64
+	MaxTradeSize float64
 	TakerFee     float64
 	Logger       *zap.Logger
 }
@@ -60,7 +60,8 @@ func (d *Detector) Start(ctx context.Context) error {
 	d.ctx = ctx
 	d.logger.Info("arbitrage-detector-starting",
 		zap.Float64("threshold", d.config.Threshold),
-		zap.Float64("min-trade-size", d.config.MinTradeSize))
+		zap.Float64("min-trade-size", d.config.MinTradeSize),
+		zap.Float64("max-trade-size", d.config.MaxTradeSize))
 
 	d.wg.Add(1)
 	go d.detectionLoop()
@@ -96,16 +97,16 @@ func (d *Detector) checkArbitrageForToken(update *types.OrderbookSnapshot) {
 	markets := d.discoveryService.GetSubscribedMarkets()
 
 	var targetMarket *types.MarketSubscription
-	var isYesToken bool
 
 	for _, market := range markets {
-		if market.TokenIDYes == update.TokenID {
-			targetMarket = market
-			isYesToken = true
-			break
-		} else if market.TokenIDNo == update.TokenID {
-			targetMarket = market
-			isYesToken = false
+		// Check all outcomes in this market
+		for _, outcome := range market.Outcomes {
+			if outcome.TokenID == update.TokenID {
+				targetMarket = market
+				break
+			}
+		}
+		if targetMarket != nil {
 			break
 		}
 	}
@@ -115,26 +116,33 @@ func (d *Detector) checkArbitrageForToken(update *types.OrderbookSnapshot) {
 		return
 	}
 
-	// Get both YES and NO orderbooks for this market
-	yesSnapshot, yesExists := d.obManager.GetSnapshot(targetMarket.TokenIDYes)
-	noSnapshot, noExists := d.obManager.GetSnapshot(targetMarket.TokenIDNo)
-
-	if !yesExists || !noExists {
-		// Need both orderbooks to check arbitrage
-		return
+	// Get orderbooks for ALL outcomes in this market
+	orderbooks := make([]*types.OrderbookSnapshot, 0, len(targetMarket.Outcomes))
+	for _, outcome := range targetMarket.Outcomes {
+		snapshot, exists := d.obManager.GetSnapshot(outcome.TokenID)
+		if !exists {
+			// Missing orderbook for this outcome - skip entire market
+			d.logger.Debug("orderbook-missing-for-outcome",
+				zap.String("market-id", targetMarket.MarketID),
+				zap.String("outcome", outcome.Outcome))
+			return
+		}
+		orderbooks = append(orderbooks, snapshot)
 	}
 
-	// Check for arbitrage
-	opp, exists := d.detect(targetMarket, yesSnapshot, noSnapshot)
+	// Check for arbitrage (works for both binary and multi-outcome)
+	opp, exists := d.detectMultiOutcome(targetMarket, orderbooks)
 	if !exists {
 		return
 	}
 
 	// Track end-to-end latency (from orderbook update to opportunity detection)
-	// Use the most recent update time from either orderbook
-	latestUpdate := yesSnapshot.LastUpdated
-	if noSnapshot.LastUpdated.After(latestUpdate) {
-		latestUpdate = noSnapshot.LastUpdated
+	// Use the most recent update time across all orderbooks
+	latestUpdate := orderbooks[0].LastUpdated
+	for _, book := range orderbooks {
+		if book.LastUpdated.After(latestUpdate) {
+			latestUpdate = book.LastUpdated
+		}
 	}
 	e2eLatency := time.Since(latestUpdate).Seconds()
 	EndToEndLatencySeconds.Observe(e2eLatency)
@@ -155,7 +163,7 @@ func (d *Detector) checkArbitrageForToken(update *types.OrderbookSnapshot) {
 			zap.String("market-slug", opp.MarketSlug),
 			zap.Int("net-profit-bps", opp.NetProfitBPS),
 			zap.Float64("net-profit", opp.NetProfit),
-			zap.Bool("yes-token-updated", isYesToken))
+			zap.Int("outcome-count", len(opp.Outcomes)))
 	default:
 		d.logger.Warn("opportunity-channel-full", zap.String("market-slug", targetMarket.MarketSlug))
 	}
@@ -168,16 +176,24 @@ func (d *Detector) detectOpportunities() {
 	markets := d.discoveryService.GetSubscribedMarkets()
 
 	for _, market := range markets {
-		// Get YES and NO orderbooks
-		yesSnapshot, yesExists := d.obManager.GetSnapshot(market.TokenIDYes)
-		noSnapshot, noExists := d.obManager.GetSnapshot(market.TokenIDNo)
+		// Get orderbooks for all outcomes
+		orderbooks := make([]*types.OrderbookSnapshot, 0, len(market.Outcomes))
+		for _, outcome := range market.Outcomes {
+			snapshot, exists := d.obManager.GetSnapshot(outcome.TokenID)
+			if !exists {
+				// Missing orderbook - skip this market
+				continue
+			}
+			orderbooks = append(orderbooks, snapshot)
+		}
 
-		if !yesExists || !noExists {
+		if len(orderbooks) != len(market.Outcomes) {
+			// Some orderbooks missing
 			continue
 		}
 
 		// Check for arbitrage
-		opp, exists := d.detect(market, yesSnapshot, noSnapshot)
+		opp, exists := d.detectMultiOutcome(market, orderbooks)
 		if !exists {
 			continue
 		}
@@ -204,25 +220,50 @@ func (d *Detector) detectOpportunities() {
 	}
 }
 
-// detect checks if an arbitrage opportunity exists for a market.
+// detect is DEPRECATED. Use detectMultiOutcome instead.
+// Kept for backward compatibility with old tests.
 func (d *Detector) detect(
 	market *types.MarketSubscription,
 	yesBook *types.OrderbookSnapshot,
 	noBook *types.OrderbookSnapshot,
 ) (*Opportunity, bool) {
-	// Validate orderbooks - use ASK prices since we're buying
-	if yesBook.BestAskPrice <= 0 || noBook.BestAskPrice <= 0 {
-		OpportunitiesRejectedTotal.WithLabelValues("invalid_price").Inc()
-		return nil, false
+	// Simply convert to multi-outcome format and call detectMultiOutcome
+	orderbooks := []*types.OrderbookSnapshot{yesBook, noBook}
+	return d.detectMultiOutcome(market, orderbooks)
+}
+
+// detectMultiOutcome checks for arbitrage in N-outcome markets (binary or multi-outcome).
+// Works by checking if SUM(all outcome ASK prices) < threshold.
+func (d *Detector) detectMultiOutcome(
+	market *types.MarketSubscription,
+	orderbooks []*types.OrderbookSnapshot,
+) (*Opportunity, bool) {
+	// Validate all orderbooks have valid prices and sizes
+	for i, book := range orderbooks {
+		if book.BestAskPrice <= 0 {
+			d.logger.Debug("invalid-ask-price",
+				zap.String("market-slug", market.MarketSlug),
+				zap.Int("outcome-index", i),
+				zap.Float64("price", book.BestAskPrice))
+			OpportunitiesRejectedTotal.WithLabelValues("invalid_price").Inc()
+			return nil, false
+		}
+
+		if book.BestAskSize <= 0 {
+			d.logger.Debug("invalid-ask-size",
+				zap.String("market-slug", market.MarketSlug),
+				zap.Int("outcome-index", i),
+				zap.Float64("size", book.BestAskSize))
+			OpportunitiesRejectedTotal.WithLabelValues("invalid_size").Inc()
+			return nil, false
+		}
 	}
 
-	if yesBook.BestAskSize <= 0 || noBook.BestAskSize <= 0 {
-		OpportunitiesRejectedTotal.WithLabelValues("invalid_size").Inc()
-		return nil, false
+	// Calculate sum of ALL ask prices
+	priceSum := 0.0
+	for _, book := range orderbooks {
+		priceSum += book.BestAskPrice
 	}
-
-	// Calculate price sum using ASK prices (what we pay to buy)
-	priceSum := yesBook.BestAskPrice + noBook.BestAskPrice
 
 	// Check if arbitrage exists
 	if priceSum >= d.config.Threshold {
@@ -230,10 +271,21 @@ func (d *Detector) detect(
 		return nil, false
 	}
 
-	// Calculate trade size using ASK sizes (available liquidity to buy)
-	maxSize := yesBook.BestAskSize
-	if noBook.BestAskSize < maxSize {
-		maxSize = noBook.BestAskSize
+	// Find minimum size across all outcomes (bottleneck for trade size)
+	maxSize := orderbooks[0].BestAskSize
+	for _, book := range orderbooks {
+		if book.BestAskSize < maxSize {
+			maxSize = book.BestAskSize
+		}
+	}
+
+	// Apply maximum trade size cap
+	if maxSize > d.config.MaxTradeSize {
+		d.logger.Debug("trade-size-capped-by-max",
+			zap.String("market-slug", market.MarketSlug),
+			zap.Float64("calculated-size", maxSize),
+			zap.Float64("max-size", d.config.MaxTradeSize))
+		maxSize = d.config.MaxTradeSize
 	}
 
 	// Check minimum trade size
@@ -246,85 +298,91 @@ func (d *Detector) detect(
 		return nil, false
 	}
 
-	// Fetch market-specific metadata (tick size and minimum order size)
-	var yesTickSize, yesMinSize, noTickSize, noMinSize float64
+	// Fetch market-specific metadata for all outcomes
+	outcomes := make([]OpportunityOutcome, len(orderbooks))
+	var requiredUSD float64
 
-	// Use metadata client if available, otherwise use defaults
-	if d.metadataClient != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
+	for i, book := range orderbooks {
+		var tickSize, minSize float64
 
-		var err error
-		yesTickSize, yesMinSize, err = d.metadataClient.GetTokenMetadata(ctx, market.TokenIDYes)
-		if err != nil {
-			d.logger.Warn("failed-to-fetch-yes-metadata",
-				zap.String("token-id", market.TokenIDYes),
-				zap.Error(err))
-			// Use defaults
-			yesTickSize = 0.01
-			yesMinSize = 5.0
+		// Use metadata client if available, otherwise use defaults
+		if d.metadataClient != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			var err error
+			tickSize, minSize, err = d.metadataClient.GetTokenMetadata(ctx, book.TokenID)
+			if err != nil {
+				d.logger.Warn("failed-to-fetch-token-metadata",
+					zap.String("token-id", book.TokenID),
+					zap.Error(err))
+				// Use defaults
+				tickSize = 0.01
+				minSize = 5.0
+			}
+		} else {
+			// No metadata client available, use defaults
+			tickSize = 0.01
+			minSize = 5.0
 		}
 
-		noTickSize, noMinSize, err = d.metadataClient.GetTokenMetadata(ctx, market.TokenIDNo)
-		if err != nil {
-			d.logger.Warn("failed-to-fetch-no-metadata",
-				zap.String("token-id", market.TokenIDNo),
-				zap.Error(err))
-			// Use defaults
-			noTickSize = 0.01
-			noMinSize = 5.0
+		// Calculate token size for this outcome
+		tokenSize := maxSize / book.BestAskPrice
+
+		// Check if this outcome meets minimum requirements
+		if tokenSize < minSize {
+			d.logger.Debug("opportunity-below-market-minimum",
+				zap.String("market-slug", market.MarketSlug),
+				zap.Int("outcome-index", i),
+				zap.Float64("token-size", tokenSize),
+				zap.Float64("min-size", minSize))
+			OpportunitiesRejectedTotal.WithLabelValues("below_market_min").Inc()
+			return nil, false
 		}
-	} else {
-		// No metadata client available, use defaults
-		yesTickSize = 0.01
-		yesMinSize = 5.0
-		noTickSize = 0.01
-		noMinSize = 5.0
+
+		// Track the largest USD minimum across all outcomes
+		requiredUSDForOutcome := minSize * book.BestAskPrice
+		if requiredUSDForOutcome > requiredUSD {
+			requiredUSD = requiredUSDForOutcome
+		}
+
+		// Build outcome structure
+		outcomes[i] = OpportunityOutcome{
+			TokenID:  book.TokenID,
+			Outcome:  market.Outcomes[i].Outcome,
+			AskPrice: book.BestAskPrice,
+			AskSize:  book.BestAskSize,
+			TickSize: tickSize,
+			MinSize:  minSize,
+		}
 	}
 
-	// Calculate token sizes for both sides
-	yesTokenSize := maxSize / yesBook.BestAskPrice
-	noTokenSize := maxSize / noBook.BestAskPrice
-
-	// Check if BOTH sides meet minimum requirements
-	if yesTokenSize < yesMinSize || noTokenSize < noMinSize {
-		d.logger.Debug("opportunity-below-market-minimum",
-			zap.String("market-slug", market.MarketSlug),
-			zap.Float64("yes-token-size", yesTokenSize),
-			zap.Float64("yes-min-size", yesMinSize),
-			zap.Float64("no-token-size", noTokenSize),
-			zap.Float64("no-min-size", noMinSize))
-		OpportunitiesRejectedTotal.WithLabelValues("below_market_min").Inc()
-		return nil, false
-	}
-
-	// Use the LARGER minimum to ensure both orders pass
-	requiredUSD := math.Max(yesMinSize*yesBook.BestAskPrice, noMinSize*noBook.BestAskPrice)
+	// Adjust maxSize upward to meet all minimum requirements
 	if maxSize < requiredUSD {
-		// Adjust maxSize upward to meet both minimums
 		maxSize = requiredUSD
 	}
 
-	// Create opportunity using ASK prices (what we pay to buy)
-	opp := NewOpportunity(
+	// Create opportunity using multi-outcome constructor
+	opp := NewMultiOutcomeOpportunity(
 		market.MarketID,
 		market.MarketSlug,
 		market.Question,
-		market.TokenIDYes,
-		market.TokenIDNo,
-		yesBook.BestAskPrice,
-		yesBook.BestAskSize,
-		noBook.BestAskPrice,
-		noBook.BestAskSize,
+		outcomes,
+		maxSize, // Pass calculated maxSize (includes all constraints)
 		d.config.Threshold,
 		d.config.TakerFee,
 	)
 
-	// Store metadata in opportunity for executor to use
-	opp.YesTickSize = yesTickSize
-	opp.YesMinSize = yesMinSize
-	opp.NoTickSize = noTickSize
-	opp.NoMinSize = noMinSize
+	// Check if net profit is positive after fees
+	if opp.NetProfit <= 0 {
+		d.logger.Debug("opportunity-has-negative-profit-after-fees",
+			zap.String("market-slug", market.MarketSlug),
+			zap.Float64("gross-profit", opp.EstimatedProfit),
+			zap.Float64("total-fees", opp.TotalFees),
+			zap.Float64("net-profit", opp.NetProfit))
+		OpportunitiesRejectedTotal.WithLabelValues("negative_profit_after_fees").Inc()
+		return nil, false
+	}
 
 	// Update metrics
 	OpportunitiesDetectedTotal.Inc()

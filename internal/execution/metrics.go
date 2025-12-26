@@ -57,4 +57,13 @@ var (
 		Name: "polymarket_execution_opportunities_executed_total",
 		Help: "Total number of opportunities successfully executed",
 	})
+
+	// OpportunitiesSkippedTotal tracks opportunities skipped for various reasons.
+	OpportunitiesSkippedTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "polymarket_execution_opportunities_skipped_total",
+			Help: "Total number of opportunities skipped (by reason)",
+		},
+		[]string{"reason"},
+	)
 )

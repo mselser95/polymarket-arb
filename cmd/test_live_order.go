@@ -112,11 +112,11 @@ func runTestLiveOrder(cmd *cobra.Command, args []string) error {
 	fmt.Printf("=== Polymarket Order Test (%s MODE) ===\n\n", mode)
 
 	if paperMode {
-		fmt.Printf("📝 Paper Trading: Simulated responses (no real orders)\n\n")
+		fmt.Printf("Paper Trading: Simulated responses (no real orders)\n\n")
 	} else if mockMode {
-		fmt.Printf("🔧 Mock Mode: Using saved API responses from %s\n\n", mockResponseFile)
+		fmt.Printf("Mock Mode: Using saved API responses from %s\n\n", mockResponseFile)
 	} else {
-		fmt.Printf("⚠️  LIVE TRADING: Real orders will be submitted!\n\n")
+		fmt.Printf("WARNING: LIVE TRADING: Real orders will be submitted!\n\n")
 	}
 
 	fmt.Printf("Market: %s\n", marketSlug)
@@ -179,14 +179,14 @@ func runTestLiveOrder(cmd *cobra.Command, args []string) error {
 	} else if mockMode {
 		yesResp, err = loadMockResponse(mockResponseFile)
 		if err != nil {
-			fmt.Printf("❌ Failed to load mock response: %v\n\n", err)
+			fmt.Printf("Failed to load mock response: %v\n\n", err)
 		} else {
 			displayOrderResponse("YES", yesResp, false)
 		}
 	} else {
 		yesResp, err = submitLiveOrder(ctx, yesOrderReq, market.ID)
 		if err != nil {
-			fmt.Printf("❌ YES order failed: %v\n\n", err)
+			fmt.Printf("YES order failed: %v\n\n", err)
 			// Save error response for future testing
 			saveResponseToFile("test_responses/last_error_yes.json", err.Error())
 		} else {
@@ -213,14 +213,14 @@ func runTestLiveOrder(cmd *cobra.Command, args []string) error {
 	} else if mockMode {
 		noResp, err = loadMockResponse(mockResponseFile)
 		if err != nil {
-			fmt.Printf("❌ Failed to load mock response: %v\n\n", err)
+			fmt.Printf("Failed to load mock response: %v\n\n", err)
 		} else {
 			displayOrderResponse("NO", noResp, false)
 		}
 	} else {
 		noResp, err = submitLiveOrder(ctx, noOrderReq, market.ID)
 		if err != nil {
-			fmt.Printf("❌ NO order failed: %v\n\n", err)
+			fmt.Printf("NO order failed: %v\n\n", err)
 			// Save error response for future testing
 			saveResponseToFile("test_responses/last_error_no.json", err.Error())
 		} else {
@@ -233,7 +233,7 @@ func runTestLiveOrder(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\n=== Test Complete ===\n")
 
 	if paperMode {
-		fmt.Printf("\n✅ Paper trading test successful!\n")
+		fmt.Printf("\nPaper trading test successful!\n")
 		fmt.Printf("   Order structure validated\n")
 		fmt.Printf("   Response parsing verified\n\n")
 		fmt.Printf("To test with real orders: add --live flag\n")
@@ -417,7 +417,7 @@ func loadConfig() (*Config, error) {
 		addr, err := deriveAddressFromPrivateKey(cfg.PrivateKey)
 		if err == nil {
 			cfg.Address = addr
-			fmt.Printf("⚠️  Using EOA address (no proxy): %s\n", addr)
+			fmt.Printf("Warning: Using EOA address (no proxy): %s\n", addr)
 		}
 	}
 
@@ -445,9 +445,9 @@ func createHMACSignature(message string, secret []byte) string {
 
 func displayOrderResponse(outcome string, resp *types.OrderSubmissionResponse, isPaper bool) {
 	if isPaper {
-		fmt.Printf("📝 %s Order (Paper)\n", outcome)
+		fmt.Printf("%s Order (Paper)\n", outcome)
 	} else {
-		fmt.Printf("✅ %s Order Submitted\n", outcome)
+		fmt.Printf("%s Order Submitted\n", outcome)
 	}
 
 	fmt.Printf("  Success: %v\n", resp.Success)
@@ -500,7 +500,7 @@ func saveOrderResponse(filename string, resp *types.OrderSubmissionResponse) {
 		return
 	}
 
-	fmt.Printf("✅ Response saved to %s\n", filename)
+	fmt.Printf("Response saved to %s\n", filename)
 }
 
 func saveResponseToFile(filename string, content string) {

@@ -84,13 +84,21 @@ func (m *Market) GetTokenByOutcome(outcome string) *Token {
 	return nil
 }
 
+// OutcomeToken represents a single outcome in a market subscription.
+// For binary markets: Outcome = "YES" or "NO"
+// For multi-outcome markets: Outcome = "Candidate A", "Team 1", etc.
+type OutcomeToken struct {
+	TokenID string // CLOB token ID for this outcome
+	Outcome string // Human-readable outcome name
+}
+
 // MarketSubscription tracks subscription state for a market.
+// Supports both binary (2 outcomes) and multi-outcome (3+) markets.
 type MarketSubscription struct {
 	MarketID     string
 	MarketSlug   string
 	Question     string
-	TokenIDYes   string
-	TokenIDNo    string
+	Outcomes     []OutcomeToken // All outcomes for this market (2+ outcomes)
 	SubscribedAt time.Time
 }
 

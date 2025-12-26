@@ -15,20 +15,20 @@ import (
 
 // Manager manages a single WebSocket connection to Polymarket.
 type Manager struct {
-	url              string
-	conn             *websocket.Conn
-	logger           *zap.Logger
-	reconnectMgr     *ReconnectManager
-	config           Config
-	messageChan      chan *types.OrderbookMessage
-	ctx              context.Context
-	cancel           context.CancelFunc
-	wg               sync.WaitGroup
-	mu               sync.RWMutex
-	subscribed       map[string]bool // tracks subscribed token IDs
-	connected        atomic.Bool
-	lastPongTime     atomic.Int64
-	connectionStart  atomic.Int64 // Unix timestamp of connection start
+	url             string
+	conn            *websocket.Conn
+	logger          *zap.Logger
+	reconnectMgr    *ReconnectManager
+	config          Config
+	messageChan     chan *types.OrderbookMessage
+	ctx             context.Context
+	cancel          context.CancelFunc
+	wg              sync.WaitGroup
+	mu              sync.RWMutex
+	subscribed      map[string]bool // tracks subscribed token IDs
+	connected       atomic.Bool
+	lastPongTime    atomic.Int64
+	connectionStart atomic.Int64 // Unix timestamp of connection start
 }
 
 // Config holds WebSocket manager configuration.
@@ -189,6 +189,63 @@ func (m *Manager) Subscribe(ctx context.Context, tokenIDs []string) error {
 	return nil
 }
 
+// Unsubscribe unsubscribes from a list of token IDs.
+func (m *Manager) Unsubscribe(ctx context.Context, tokenIDs []string) (err error) {
+	if len(tokenIDs) == 0 {
+		return nil
+	}
+
+	m.mu.Lock()
+
+	// Filter to only tokens that are currently subscribed
+	tokensToUnsubscribe := make([]string, 0, len(tokenIDs))
+	for _, tokenID := range tokenIDs {
+		if m.subscribed[tokenID] {
+			tokensToUnsubscribe = append(tokensToUnsubscribe, tokenID)
+			delete(m.subscribed, tokenID)
+		}
+	}
+
+	if len(tokensToUnsubscribe) == 0 {
+		m.mu.Unlock()
+		m.logger.Debug("no-tokens-to-unsubscribe")
+		return nil
+	}
+
+	// Build unsubscribe message
+	unsubscribeMsg := map[string]interface{}{
+		"assets_ids": tokensToUnsubscribe,
+		"operation":  "unsubscribe",
+	}
+
+	totalSubscribed := len(m.subscribed)
+	m.mu.Unlock()
+
+	// Send unsubscribe message (without holding lock)
+	err = m.conn.WriteJSON(unsubscribeMsg)
+	if err != nil {
+		// Rollback: re-add tokens to subscribed map
+		m.mu.Lock()
+		for _, tokenID := range tokensToUnsubscribe {
+			m.subscribed[tokenID] = true
+		}
+		totalSubscribed = len(m.subscribed)
+		m.mu.Unlock()
+
+		SubscriptionCount.Set(float64(totalSubscribed))
+		return fmt.Errorf("write unsubscribe message: %w", err)
+	}
+
+	SubscriptionCount.Set(float64(totalSubscribed))
+	UnsubscriptionsTotal.Inc()
+
+	m.logger.Info("unsubscribed-from-tokens",
+		zap.Int("count", len(tokensToUnsubscribe)),
+		zap.Int("remaining-count", totalSubscribed))
+
+	return nil
+}
+
 // readLoop reads messages from the WebSocket.
 func (m *Manager) readLoop() {
 	defer m.wg.Done()
@@ -229,10 +286,36 @@ func (m *Manager) readLoop() {
 		var obMsgs []types.OrderbookMessage
 		err = json.Unmarshal(message, &obMsgs)
 		if err != nil {
-			// Skip messages that don't match our expected format
-			// (e.g., price_changes batch updates, subscription confirmations)
-			m.logger.Debug("skipping-unsupported-message-format",
-				zap.Error(err))
+			// Try to identify message type for better logging
+			messageStr := string(message)
+
+			// Check if it's a heartbeat/keepalive (empty array or minimal content)
+			if messageStr == "[]" || messageStr == "" || len(message) < 10 {
+				m.logger.Debug("websocket-heartbeat-received",
+					zap.Int("bytes", len(message)))
+				continue
+			}
+
+			// Check if it's a subscription confirmation or other control message
+			var controlMsg map[string]interface{}
+			if json.Unmarshal(message, &controlMsg) == nil {
+				if msgType, ok := controlMsg["type"].(string); ok {
+					m.logger.Debug("websocket-control-message",
+						zap.String("type", msgType),
+						zap.Int("bytes", len(message)))
+					continue
+				}
+			}
+
+			// Unknown message format
+			previewLen := len(messageStr)
+			if previewLen > 100 {
+				previewLen = 100
+			}
+			m.logger.Debug("websocket-unparseable-message",
+				zap.Error(err),
+				zap.Int("bytes", len(message)),
+				zap.String("preview", messageStr[:previewLen]))
 			continue
 		}
 

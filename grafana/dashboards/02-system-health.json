@@ -3,7 +3,7 @@
   "tags": ["polymarket", "health", "operational"],
   "timezone": "browser",
   "schemaVersion": 38,
-  "version": 1,
+  "version": 2,
   "refresh": "5s",
   "templating": {
     "list": [
@@ -47,9 +47,40 @@
     },
     {
       "id": 2,
+      "title": "WebSocket Pool Status",
+      "type": "gauge",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "targets": [
+        {
+          "expr": "polymarket_ws_pool_active_connections",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "max": 5,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": 0, "color": "red"},
+              {"value": 3, "color": "yellow"},
+              {"value": 5, "color": "green"}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
       "title": "Message Processing Latency (p99)",
       "type": "stat",
-      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
       "targets": [
         {
           "expr": "histogram_quantile(0.99, rate(polymarket_ws_message_latency_seconds_bucket[1m]))",
@@ -71,10 +102,10 @@
       }
     },
     {
-      "id": 3,
+      "id": 4,
       "title": "Cache Hit Rate",
       "type": "gauge",
-      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
       "targets": [
         {
           "expr": "polymarket_cache_hit_rate",
@@ -97,10 +128,10 @@
       }
     },
     {
-      "id": 4,
+      "id": 5,
       "title": "Active Subscriptions",
       "type": "stat",
-      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 4},
       "targets": [
         {
           "expr": "polymarket_ws_subscription_count",
@@ -122,10 +153,65 @@
       }
     },
     {
-      "id": 5,
+      "id": 6,
+      "title": "Pool Subscription Distribution",
+      "type": "heatmap",
+      "gridPos": {"h": 4, "w": 9, "x": 6, "y": 4},
+      "targets": [
+        {
+          "expr": "rate(polymarket_ws_pool_subscription_distribution_bucket[1m])",
+          "format": "heatmap",
+          "legendFormat": "{{le}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "calculate": true,
+        "cellGap": 2,
+        "color": {
+          "mode": "scheme",
+          "scheme": "Blues"
+        },
+        "yAxis": {
+          "axisLabel": "Subscriptions per Connection",
+          "axisPlacement": "left"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "title": "Pool Multiplex Latency (p99)",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 9, "x": 15, "y": 4},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, rate(polymarket_ws_pool_multiplex_latency_seconds_bucket[1m])) * 1000000",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "µs",
+          "decimals": 2,
+          "thresholds": {
+            "steps": [
+              {"value": 0, "color": "green"},
+              {"value": 100, "color": "yellow"},
+              {"value": 1000, "color": "red"}
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area"
+      }
+    },
+    {
+      "id": 8,
       "title": "Execution Errors by Type",
       "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
       "targets": [
         {
           "expr": "rate(polymarket_execution_errors_by_type_total[1m])",
@@ -141,10 +227,10 @@
       }
     },
     {
-      "id": 6,
+      "id": 9,
       "title": "Messages Dropped by Component",
       "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
       "targets": [
         {
           "expr": "rate(polymarket_ws_messages_dropped_total[1m])",
@@ -166,10 +252,10 @@
       }
     },
     {
-      "id": 7,
+      "id": 10,
       "title": "Orderbook Lock Contention",
       "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
       "targets": [
         {
           "expr": "histogram_quantile(0.50, rate(polymarket_orderbook_lock_contention_seconds_bucket[1m]))",
@@ -195,10 +281,10 @@
       }
     },
     {
-      "id": 8,
+      "id": 11,
       "title": "WebSocket Reconnection Attempts",
       "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
       "targets": [
         {
           "expr": "rate(polymarket_ws_reconnect_attempts_total[1m])",
@@ -218,10 +304,10 @@
       }
     },
     {
-      "id": 9,
+      "id": 12,
       "title": "Cache Operations Latency",
       "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 20},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
       "targets": [
         {
           "expr": "histogram_quantile(0.99, rate(polymarket_cache_operation_duration_seconds_bucket{operation=\"get\"}[1m]))",
@@ -242,10 +328,10 @@
       }
     },
     {
-      "id": 10,
+      "id": 13,
       "title": "WebSocket Connection Duration",
       "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 20},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
       "targets": [
         {
           "expr": "histogram_quantile(0.50, rate(polymarket_ws_connection_duration_seconds_bucket[5m]))",
@@ -265,10 +351,10 @@
       }
     },
     {
-      "id": 11,
+      "id": 14,
       "title": "Discovery Poll Duration",
       "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 28},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
       "targets": [
         {
           "expr": "histogram_quantile(0.50, rate(polymarket_discovery_poll_duration_seconds_bucket[1m]))",
@@ -288,10 +374,10 @@
       }
     },
     {
-      "id": 12,
+      "id": 15,
       "title": "Orderbook Snapshots Tracked",
       "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 28},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
       "targets": [
         {
           "expr": "polymarket_orderbook_snapshots_tracked",

@@ -56,8 +56,6 @@ services:
       - "3000:3000"
     volumes:
       - grafana_data:/var/lib/grafana
-      - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - prometheus
     networks:
@@ -182,47 +180,6 @@ services:
         condition: service_healthy
       db-init:
         condition: service_completed_successfully
-    environment:
-      # Application
-      LOG_LEVEL: info
-      HTTP_PORT: 8080
-
-      # Polymarket API
-      POLYMARKET_WS_URL: wss://ws-subscriptions-clob.polymarket.com/ws/market
-      POLYMARKET_GAMMA_API_URL: https://gamma-api.polymarket.com
-
-      # PostgreSQL
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_USER: polymarket
-      POSTGRES_PASSWORD: polymarket123
-      POSTGRES_DB: polymarket_arb
-      POSTGRES_SSLMODE: disable
-
-      # Storage mode: "postgres" or "console"
-      STORAGE_MODE: postgres
-
-      # Market Discovery
-      DISCOVERY_POLL_INTERVAL: 30s
-      DISCOVERY_MARKET_LIMIT: 50
-
-      # WebSocket
-      WS_DIAL_TIMEOUT: 10s
-      WS_PONG_TIMEOUT: 15s
-      WS_PING_INTERVAL: 10s
-      WS_RECONNECT_INITIAL_DELAY: 1s
-      WS_RECONNECT_MAX_DELAY: 30s
-      WS_MESSAGE_BUFFER_SIZE: 1000
-
-      # Arbitrage Detection
-      ARB_THRESHOLD: 0.995
-      ARB_MIN_TRADE_SIZE: 10.0
-      ARB_DETECTION_INTERVAL: 100ms
-      ARB_TAKER_FEE: 0.0100  # 1% taker fee
-
-      # Execution - DRY RUN MODE (safe, no real trades)
-      EXECUTION_MODE: dry-run
-      EXECUTION_MAX_POSITION_SIZE: 1000.0
     env_file:
       - .env
     ports:

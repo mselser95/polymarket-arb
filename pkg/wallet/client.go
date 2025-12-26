@@ -40,6 +40,7 @@ type Balances struct {
 // Position represents a market position from the Data API.
 type Position struct {
 	MarketSlug   string
+	ConditionID  string
 	Outcome      string
 	Size         float64
 	Value        float64 // Current USD value
@@ -221,6 +222,7 @@ func (c *Client) GetPositions(ctx context.Context, address string) (positions []
 		if pos.Size > 0 {
 			position := Position{
 				MarketSlug:   pos.Slug,
+				ConditionID:  pos.ConditionID,
 				Outcome:      pos.Outcome,
 				Size:         pos.Size,
 				Value:        pos.CurrentValue,

@@ -2,9 +2,14 @@ package app
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"fmt"
+	"os"
+	"strings"
 
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/mselser95/polymarket-arb/internal/arbitrage"
+	"github.com/mselser95/polymarket-arb/internal/circuitbreaker"
 	"github.com/mselser95/polymarket-arb/internal/discovery"
 	"github.com/mselser95/polymarket-arb/internal/execution"
 	"github.com/mselser95/polymarket-arb/internal/markets"
@@ -14,6 +19,7 @@ import (
 	"github.com/mselser95/polymarket-arb/pkg/config"
 	"github.com/mselser95/polymarket-arb/pkg/healthprobe"
 	"github.com/mselser95/polymarket-arb/pkg/httpserver"
+	"github.com/mselser95/polymarket-arb/pkg/wallet"
 	"github.com/mselser95/polymarket-arb/pkg/websocket"
 	"go.uber.org/zap"
 )
@@ -38,8 +44,8 @@ func New(cfg *config.Config, logger *zap.Logger, opts *Options) (*App, error) {
 	}
 
 	discoveryService := setupDiscoveryService(cfg, logger, marketCache, opts)
-	wsManager := setupWebSocketManager(cfg, logger)
-	obManager := setupOrderbookManager(logger, wsManager)
+	wsPool := setupWebSocketPool(cfg, logger)
+	obManager := setupOrderbookManager(logger, wsPool)
 
 	// Setup storage
 	arbStorage, err := setupStorage(cfg, logger)
@@ -52,7 +58,11 @@ func New(cfg *config.Config, logger *zap.Logger, opts *Options) (*App, error) {
 	arbDetector := setupArbitrageDetector(cfg, logger, obManager, discoveryService, arbStorage, marketCache)
 
 	// Setup executor
-	executor := setupExecutor(cfg, logger, arbDetector)
+	executor, err := setupExecutor(ctx, cfg, logger, arbDetector)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("setup executor: %w", err)
+	}
 
 	return &App{
 		cfg:              cfg,
@@ -60,7 +70,7 @@ func New(cfg *config.Config, logger *zap.Logger, opts *Options) (*App, error) {
 		healthChecker:    healthChecker,
 		httpServer:       httpServer,
 		discoveryService: discoveryService,
-		wsManager:        wsManager,
+		wsPool:           wsPool,
 		obManager:        obManager,
 		arbDetector:      arbDetector,
 		executor:         executor,
@@ -84,9 +94,9 @@ func setupHTTPServer(cfg *config.Config, logger *zap.Logger, healthChecker *heal
 
 func setupCache(logger *zap.Logger) (cache.Cache, error) {
 	return cache.NewRistrettoCache(&cache.RistrettoConfig{
-		NumCounters: 10000,    // 10x expected max items (1000 markets)
-		MaxCost:     1000,     // Maximum 1000 items in cache
-		BufferItems: 64,       // Buffer size for Get operations
+		NumCounters: 10000, // 10x expected max items (1000 markets)
+		MaxCost:     1000,  // Maximum 1000 items in cache
+		BufferItems: 64,    // Buffer size for Get operations
 		Logger:      logger,
 	})
 }
@@ -94,18 +104,20 @@ func setupCache(logger *zap.Logger) (cache.Cache, error) {
 func setupDiscoveryService(cfg *config.Config, logger *zap.Logger, marketCache cache.Cache, opts *Options) *discovery.Service {
 	discoveryClient := discovery.NewClient(cfg.PolymarketGammaURL, logger)
 	return discovery.New(&discovery.Config{
-		Client:       discoveryClient,
-		Cache:        marketCache,
-		PollInterval: cfg.DiscoveryPollInterval,
-		MarketLimit:  cfg.DiscoveryMarketLimit,
-		Logger:       logger,
-		SingleMarket: opts.SingleMarket,
+		Client:            discoveryClient,
+		Cache:             marketCache,
+		PollInterval:      cfg.DiscoveryPollInterval,
+		MarketLimit:       cfg.DiscoveryMarketLimit,
+		MaxMarketDuration: cfg.MaxMarketDuration,
+		Logger:            logger,
+		SingleMarket:      opts.SingleMarket,
 	})
 }
 
-func setupWebSocketManager(cfg *config.Config, logger *zap.Logger) *websocket.Manager {
-	return websocket.New(websocket.Config{
-		URL:                   cfg.PolymarketWSURL,
+func setupWebSocketPool(cfg *config.Config, logger *zap.Logger) *websocket.Pool {
+	return websocket.NewPool(websocket.PoolConfig{
+		Size:                  cfg.WSPoolSize,
+		WSUrl:                 cfg.PolymarketWSURL,
 		DialTimeout:           cfg.WSDialTimeout,
 		PongTimeout:           cfg.WSPongTimeout,
 		PingInterval:          cfg.WSPingInterval,
@@ -117,10 +129,10 @@ func setupWebSocketManager(cfg *config.Config, logger *zap.Logger) *websocket.Ma
 	})
 }
 
-func setupOrderbookManager(logger *zap.Logger, wsManager *websocket.Manager) *orderbook.Manager {
+func setupOrderbookManager(logger *zap.Logger, wsPool *websocket.Pool) *orderbook.Manager {
 	return orderbook.New(&orderbook.Config{
 		Logger:         logger,
-		MessageChannel: wsManager.MessageChan(),
+		MessageChannel: wsPool.MessageChan(),
 	})
 }
 
@@ -160,6 +172,7 @@ func setupArbitrageDetector(
 		arbitrage.Config{
 			Threshold:    cfg.ArbThreshold,
 			MinTradeSize: cfg.ArbMinTradeSize,
+			MaxTradeSize: cfg.ArbMaxTradeSize,
 			TakerFee:     cfg.ArbTakerFee,
 			Logger:       logger,
 		},
@@ -170,11 +183,89 @@ func setupArbitrageDetector(
 	)
 }
 
-func setupExecutor(cfg *config.Config, logger *zap.Logger, arbDetector *arbitrage.Detector) *execution.Executor {
-	return execution.New(&execution.Config{
+func setupExecutor(
+	ctx context.Context,
+	cfg *config.Config,
+	logger *zap.Logger,
+	arbDetector *arbitrage.Detector,
+) (executor *execution.Executor, err error) {
+	// Don't create executor in dry-run mode
+	if cfg.ExecutionMode == "dry-run" {
+		logger.Info("executor-disabled-dry-run-mode",
+			zap.String("mode", cfg.ExecutionMode),
+			zap.String("note", "opportunities will be detected and logged only"))
+		return nil, nil
+	}
+
+	// Create circuit breaker if enabled
+	var breaker *circuitbreaker.BalanceCircuitBreaker
+	if cfg.CircuitBreakerEnabled {
+		// Parse wallet address for balance checking
+		privateKeyHex := os.Getenv("POLYMARKET_PRIVATE_KEY")
+		if privateKeyHex == "" {
+			logger.Warn("circuit-breaker-disabled-no-private-key",
+				zap.String("note", "POLYMARKET_PRIVATE_KEY not set, circuit breaker disabled"))
+		} else {
+			// Parse private key to derive address
+			privateKey, parseErr := crypto.HexToECDSA(strings.TrimPrefix(privateKeyHex, "0x"))
+			if parseErr != nil {
+				logger.Warn("circuit-breaker-disabled-invalid-key",
+					zap.Error(parseErr))
+			} else {
+				publicKey := privateKey.Public()
+				publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
+				if !ok {
+					logger.Warn("circuit-breaker-disabled-key-cast-failed")
+				} else {
+					address := crypto.PubkeyToAddress(*publicKeyECDSA)
+
+					// Create wallet client for balance checking
+					// Use Polygon mainnet RPC endpoint - could be made configurable
+					rpcURL := os.Getenv("POLYGON_RPC_URL")
+					if rpcURL == "" {
+						rpcURL = "https://polygon-rpc.com"
+					}
+
+					walletClient, walletErr := wallet.NewClient(rpcURL, logger)
+					if walletErr != nil {
+						logger.Warn("circuit-breaker-disabled-wallet-client-failed",
+							zap.Error(walletErr))
+					} else {
+						// Create circuit breaker
+						breaker, err = circuitbreaker.New(&circuitbreaker.Config{
+							CheckInterval:   cfg.CircuitBreakerCheckInterval,
+							TradeMultiplier: cfg.CircuitBreakerTradeMultiplier,
+							MinAbsolute:     cfg.CircuitBreakerMinAbsolute,
+							HysteresisRatio: cfg.CircuitBreakerHysteresisRatio,
+							WalletClient:    walletClient,
+							Address:         address,
+							Logger:          logger,
+						})
+						if err != nil {
+							return nil, fmt.Errorf("create circuit breaker: %w", err)
+						}
+
+						// Start background monitoring
+						breaker.Start(ctx)
+
+						logger.Info("circuit-breaker-enabled",
+							zap.Duration("check_interval", cfg.CircuitBreakerCheckInterval),
+							zap.Float64("trade_multiplier", cfg.CircuitBreakerTradeMultiplier),
+							zap.Float64("min_absolute", cfg.CircuitBreakerMinAbsolute),
+							zap.Float64("hysteresis_ratio", cfg.CircuitBreakerHysteresisRatio))
+					}
+				}
+			}
+		}
+	}
+
+	executor = execution.New(&execution.Config{
 		Mode:               cfg.ExecutionMode,
 		MaxPositionSize:    cfg.ExecutionMaxPositionSize,
 		Logger:             logger,
 		OpportunityChannel: arbDetector.OpportunityChan(),
+		CircuitBreaker:     breaker,
 	})
+
+	return executor, nil
 }

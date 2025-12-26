@@ -6,38 +6,11 @@ import (
 	"io"
 	"os"
 	"testing"
-	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/mselser95/polymarket-arb/internal/arbitrage"
+	"github.com/mselser95/polymarket-arb/internal/testutil"
 	"go.uber.org/zap"
 )
-
-// Helper function to create a test opportunity
-func createTestOpportunity() *arbitrage.Opportunity {
-	return &arbitrage.Opportunity{
-		ID:               "test-opp-123",
-		MarketID:         "market-123",
-		MarketSlug:       "test-market",
-		MarketQuestion:   "Will X happen?",
-		YesTokenID:       "test-yes-token-123",
-		NoTokenID:        "test-no-token-123",
-		DetectedAt:       time.Now(),
-		YesAskPrice:      0.48,
-		YesAskSize:       100.0,
-		NoAskPrice:       0.51,
-		NoAskSize:        100.0,
-		PriceSum:         0.99,
-		ProfitMargin:     0.01,
-		ProfitBPS:        100,
-		MaxTradeSize:     100.0,
-		EstimatedProfit:  1.0,
-		TotalFees:        0.2,
-		NetProfit:        0.8,
-		NetProfitBPS:     80,
-		ConfigThreshold:  0.995,
-	}
-}
 
 // TestConsoleStorage tests the console storage implementation
 func TestConsoleStorage_New(t *testing.T) {
@@ -58,7 +31,7 @@ func TestConsoleStorage_StoreOpportunity(t *testing.T) {
 	logger, _ := zap.NewDevelopment()
 	storage := NewConsoleStorage(logger)
 
-	opp := createTestOpportunity()
+	opp := testutil.CreateTestOpportunity("market-123", "test-market")
 	ctx := context.Background()
 
 	// Capture stdout
@@ -121,10 +94,11 @@ func TestPostgresStorage_StoreOpportunity(t *testing.T) {
 		logger: logger,
 	}
 
-	opp := createTestOpportunity()
+	opp := testutil.CreateTestOpportunity("market-123", "test-market")
 	ctx := context.Background()
 
-	// Expect INSERT query
+	// Expect INSERT query with new Outcomes structure
+	// Postgres storage extracts first 2 outcomes for backward compatibility
 	mock.ExpectExec("INSERT INTO arbitrage_opportunities").
 		WithArgs(
 			opp.ID,
@@ -132,11 +106,11 @@ func TestPostgresStorage_StoreOpportunity(t *testing.T) {
 			opp.MarketSlug,
 			opp.MarketQuestion,
 			sqlmock.AnyArg(), // DetectedAt (time.Time is tricky)
-			opp.YesAskPrice,
-			opp.YesAskSize,
-			opp.NoAskPrice,
-			opp.NoAskSize,
-			opp.PriceSum,
+			opp.Outcomes[0].AskPrice,  // yes_ask_price
+			opp.Outcomes[0].AskSize,   // yes_ask_size
+			opp.Outcomes[1].AskPrice,  // no_ask_price
+			opp.Outcomes[1].AskSize,   // no_ask_size
+			opp.TotalPriceSum,         // price_sum
 			opp.ProfitMargin,
 			opp.ProfitBPS,
 			opp.MaxTradeSize,
@@ -174,7 +148,7 @@ func TestPostgresStorage_StoreOpportunity_Error(t *testing.T) {
 		logger: logger,
 	}
 
-	opp := createTestOpportunity()
+	opp := testutil.CreateTestOpportunity("market-123", "test-market")
 	ctx := context.Background()
 
 	// Expect INSERT query to fail
@@ -185,11 +159,11 @@ func TestPostgresStorage_StoreOpportunity_Error(t *testing.T) {
 			opp.MarketSlug,
 			opp.MarketQuestion,
 			sqlmock.AnyArg(),
-			opp.YesAskPrice,
-			opp.YesAskSize,
-			opp.NoAskPrice,
-			opp.NoAskSize,
-			opp.PriceSum,
+			opp.Outcomes[0].AskPrice,  // yes_ask_price
+			opp.Outcomes[0].AskSize,   // yes_ask_size
+			opp.Outcomes[1].AskPrice,  // no_ask_price
+			opp.Outcomes[1].AskSize,   // no_ask_size
+			opp.TotalPriceSum,         // price_sum
 			opp.ProfitMargin,
 			opp.ProfitBPS,
 			opp.MaxTradeSize,
@@ -291,7 +265,7 @@ func TestPostgresStorage_QueryStructure(t *testing.T) {
 		logger: logger,
 	}
 
-	opp := createTestOpportunity()
+	opp := testutil.CreateTestOpportunity("market-123", "test-market")
 	ctx := context.Background()
 
 	// Expect INSERT with exact parameter count (18 parameters)

@@ -188,6 +188,57 @@ func (c *OrderClient) PlaceOrders(
 	return yesResp, noResp, nil
 }
 
+// GetMakerAddress returns the maker address (proxy if set, otherwise EOA).
+func (c *OrderClient) GetMakerAddress() (makerAddress string) {
+	if c.proxyAddress != "" {
+		return c.proxyAddress
+	}
+	return c.address
+}
+
+// GetSignerAddress returns the signer address (always the EOA).
+func (c *OrderClient) GetSignerAddress() (signerAddress string) {
+	return c.address
+}
+
+// GetSignatureType returns the signature type.
+func (c *OrderClient) GetSignatureType() (signatureType model.SignatureType) {
+	return c.signatureType
+}
+
+// PlaceSingleOrder places a single order with the given OrderData.
+// This method is useful for closing positions or placing standalone orders.
+func (c *OrderClient) PlaceSingleOrder(
+	ctx context.Context,
+	orderData *model.OrderData,
+) (resp *types.OrderSubmissionResponse, err error) {
+	// Build and sign the order
+	signedOrder, err := c.orderBuilder.BuildSignedOrder(c.privateKey, orderData, model.CTFExchange)
+	if err != nil {
+		return nil, fmt.Errorf("build order: %w", err)
+	}
+
+	// Convert Side to string for logging
+	sideStr := "BUY"
+	if orderData.Side == model.SELL {
+		sideStr = "SELL"
+	}
+
+	c.logger.Info("single-order-built",
+		zap.String("maker", orderData.Maker),
+		zap.String("signer", orderData.Signer),
+		zap.String("token_id", orderData.TokenId),
+		zap.String("side", sideStr))
+
+	// Submit the order
+	resp, err = c.submitOrder(ctx, signedOrder)
+	if err != nil {
+		return nil, fmt.Errorf("submit order: %w", err)
+	}
+
+	return resp, nil
+}
+
 // PlaceOrdersBatch places YES and NO orders atomically using the batch endpoint.
 // This is the preferred method as it submits both orders in a single API call.
 func (c *OrderClient) PlaceOrdersBatch(

@@ -219,7 +219,7 @@ func runPlaceOrders(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("build NO order: %w", err)
 	}
 
-	fmt.Printf("✅ Orders built and signed successfully\n\n")
+	fmt.Printf("Orders built and signed successfully\n\n")
 
 	if dryRun {
 		fmt.Printf("=== DRY RUN - Orders Built Successfully ===\n\n")
@@ -244,7 +244,7 @@ func runPlaceOrders(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Side: %s\n", noSignedOrder.Side.String())
 		fmt.Printf("  Signature: 0x%s\n\n", common.Bytes2Hex(noSignedOrder.Signature))
 
-		fmt.Printf("✅ Orders are valid EIP-712 signed messages\n")
+		fmt.Printf("Orders are valid EIP-712 signed messages\n")
 		fmt.Printf("   Ready to submit when --dry-run flag is removed\n")
 		return nil
 	}
@@ -257,9 +257,9 @@ func runPlaceOrders(cmd *cobra.Command, args []string) error {
 
 	yesResp, err := submitSingleOrder(ctx3, cfg, yesSignedOrder)
 	if err != nil {
-		fmt.Printf("❌ YES order failed: %v\n\n", err)
+		fmt.Printf("YES order failed: %v\n\n", err)
 	} else {
-		fmt.Printf("✅ YES order submitted!\n")
+		fmt.Printf("YES order submitted!\n")
 		fmt.Printf("  Success: %v\n", yesResp.Success)
 		fmt.Printf("  Order ID: %s\n", yesResp.OrderID)
 		fmt.Printf("  Status: %s\n", yesResp.Status)
@@ -271,9 +271,9 @@ func runPlaceOrders(cmd *cobra.Command, args []string) error {
 
 	noResp, err := submitSingleOrder(ctx3, cfg, noSignedOrder)
 	if err != nil {
-		fmt.Printf("❌ NO order failed: %v\n\n", err)
+		fmt.Printf("NO order failed: %v\n\n", err)
 	} else {
-		fmt.Printf("✅ NO order submitted!\n")
+		fmt.Printf("NO order submitted!\n")
 		fmt.Printf("  Success: %v\n", noResp.Success)
 		fmt.Printf("  Order ID: %s\n", noResp.OrderID)
 		fmt.Printf("  Status: %s\n", noResp.Status)

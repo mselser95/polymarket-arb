@@ -30,4 +30,10 @@ var (
 		Name: "polymarket_discovery_poll_errors_total",
 		Help: "Total number of Gamma API poll failures",
 	})
+
+	// MarketsFilteredByEndDateTotal tracks markets filtered due to EndDate threshold.
+	MarketsFilteredByEndDateTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "polymarket_discovery_markets_filtered_by_end_date_total",
+		Help: "Total number of markets filtered out due to EndDate threshold",
+	})
 )

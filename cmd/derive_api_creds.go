@@ -195,12 +195,12 @@ func runDeriveAPICreds(cmd *cobra.Command, args []string) error {
 	}
 
 	// Display credentials
-	fmt.Printf("=== ✅ API Credentials Derived ===\n\n")
+	fmt.Printf("=== API Credentials Derived ===\n\n")
 	fmt.Printf("POLYMARKET_API_KEY=%s\n", creds.APIKey)
 	fmt.Printf("POLYMARKET_SECRET=%s\n", creds.Secret)
 	fmt.Printf("POLYMARKET_PASSPHRASE=%s\n\n", creds.Passphrase)
-	fmt.Printf("⚠️  Save these to your .env file immediately!\n")
-	fmt.Printf("⚠️  They are cryptographically linked to your private key.\n")
+	fmt.Printf("WARNING: Save these to your .env file immediately!\n")
+	fmt.Printf("WARNING: They are cryptographically linked to your private key.\n")
 
 	return nil
 }

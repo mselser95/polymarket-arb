@@ -1,6 +1,7 @@
 .PHONY: help build lint test test-unit test-bench test-race test-all test-execution test-execution-verbose test-execution-coverage run run-single list-markets watch clean
 .PHONY: docker-build docker-up docker-down docker-logs docker-clean
 .PHONY: migrate-up migrate-down db-shell dev
+.PHONY: grafana-provision grafana-provision-datasource
 
 help: ## Show this help message
 	@echo "Usage: make [target]"
@@ -120,4 +121,29 @@ db-shell: ## Open PostgreSQL shell
 # Development
 dev: ## Run locally with live reload (requires air)
 	@air
+
+# Grafana provisioning
+grafana-provision: ## Delete and recreate all Grafana dashboards
+	@echo "Provisioning Grafana dashboards..."
+	@echo "Deleting existing dashboards..."
+	@for uid in $$(curl -s http://admin:admin@localhost:3001/api/search?type=dash-db | jq -r '.[].uid'); do \
+		echo "  Deleting: $$uid"; \
+		curl -s -X DELETE http://admin:admin@localhost:3001/api/dashboards/uid/$$uid > /dev/null; \
+	done
+	@echo ""
+	@echo "Uploading new dashboards..."
+	@for dashboard in grafana/dashboards/*.json; do \
+		echo "  Uploading: $$dashboard"; \
+		cat $$dashboard | jq '{dashboard: ., overwrite: true, folderUid: "", message: "Provisioned via Makefile"}' | \
+		curl -s -X POST -H "Content-Type: application/json" -d @- http://admin:admin@localhost:3001/api/dashboards/db | \
+		jq -r '"    ✅ " + .slug + " (http://localhost:3001" + .url + ")"'; \
+	done
+	@echo ""
+	@echo "✅ Grafana dashboards provisioned successfully!"
+
+grafana-provision-datasource: ## Provision Prometheus datasource in Grafana
+	@echo "Provisioning Prometheus datasource..."
+	@echo '{"name":"Prometheus","type":"prometheus","access":"proxy","url":"http://prometheus:9090","isDefault":true,"jsonData":{"timeInterval":"5s","queryTimeout":"60s","httpMethod":"POST"}}' | \
+		curl -s -X POST -H "Content-Type: application/json" -d @- http://admin:admin@localhost:3001/api/datasources | \
+		jq -r 'if .datasource then "✅ Datasource provisioned: " + .datasource.name + " (ID: " + (.datasource.id | tostring) + ")" else "⚠️  " + .message end'
 

@@ -54,29 +54,43 @@ func CreateTestPriceChangeMessage(assetID string, marketID string) *types.Orderb
 	return CreateTestOrderbookMessage("price_change", assetID, marketID)
 }
 
-// CreateTestOpportunity creates a test arbitrage opportunity.
+// CreateTestOpportunity creates a test arbitrage opportunity (binary market).
 func CreateTestOpportunity(marketID string, marketSlug string) *arbitrage.Opportunity {
+	outcomes := []arbitrage.OpportunityOutcome{
+		{
+			TokenID:  "test-yes-token-" + marketID,
+			Outcome:  "YES",
+			AskPrice: 0.48,
+			AskSize:  100.0,
+			TickSize: 0.01,
+			MinSize:  5.0,
+		},
+		{
+			TokenID:  "test-no-token-" + marketID,
+			Outcome:  "NO",
+			AskPrice: 0.51,
+			AskSize:  100.0,
+			TickSize: 0.01,
+			MinSize:  5.0,
+		},
+	}
+
 	return &arbitrage.Opportunity{
-		ID:               "test-opp-" + marketID,
-		MarketID:         marketID,
-		MarketSlug:       marketSlug,
-		MarketQuestion:   "Test market: " + marketSlug,
-		YesTokenID:       "test-yes-token-" + marketID,
-		NoTokenID:        "test-no-token-" + marketID,
-		DetectedAt:       time.Now(),
-		YesAskPrice:      0.48,
-		YesAskSize:       100.0,
-		NoAskPrice:       0.51,
-		NoAskSize:        100.0,
-		PriceSum:         0.99,
-		ProfitMargin:     0.01,
-		ProfitBPS:        100,
-		MaxTradeSize:     100.0,
-		EstimatedProfit:  1.0,
-		TotalFees:        0.2,
-		NetProfit:        0.8,
-		NetProfitBPS:     80,
-		ConfigThreshold:  0.995,
+		ID:              "test-opp-" + marketID,
+		MarketID:        marketID,
+		MarketSlug:      marketSlug,
+		MarketQuestion:  "Test market: " + marketSlug,
+		Outcomes:        outcomes,
+		DetectedAt:      time.Now(),
+		TotalPriceSum:   0.99,
+		ProfitMargin:    0.01,
+		ProfitBPS:       100,
+		MaxTradeSize:    100.0,
+		EstimatedProfit: 1.0,
+		TotalFees:       0.2,
+		NetProfit:       0.8,
+		NetProfitBPS:    80,
+		ConfigThreshold: 0.995,
 	}
 }
 

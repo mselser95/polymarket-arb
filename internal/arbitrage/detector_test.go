@@ -15,6 +15,7 @@ func TestDetect(t *testing.T) {
 		name               string
 		threshold          float64
 		minTradeSize       float64
+		maxTradeSize       float64
 		yesAsk             float64
 		yesAskSize         float64
 		noAsk              float64
@@ -26,6 +27,7 @@ func TestDetect(t *testing.T) {
 			name:         "no-arbitrage-efficient-market",
 			threshold:    0.995,
 			minTradeSize: 10.0,
+			maxTradeSize: 1000.0,
 			yesAsk:       0.50,
 			yesAskSize:   100.0,
 			noAsk:        0.50,
@@ -36,6 +38,7 @@ func TestDetect(t *testing.T) {
 			name:               "arbitrage-exists-after-fees",
 			threshold:          0.995,
 			minTradeSize:       10.0,
+			maxTradeSize:       1000.0,
 			yesAsk:             0.48,
 			yesAskSize:         100.0,
 			noAsk:              0.48,
@@ -44,20 +47,21 @@ func TestDetect(t *testing.T) {
 			expectNetProfitBPS: 304, // Gross: 400bps, Fees: ~96bps, Net: ~304bps
 		},
 		{
-			name:               "at-threshold-boundary",
-			threshold:          0.995,
-			minTradeSize:       10.0,
-			yesAsk:             0.497,
-			yesAskSize:         100.0,
-			noAsk:              0.497,
-			noAskSize:          100.0,
-			expectOpp:          true, // 0.994 < 0.995, so arbitrage exists
-			expectNetProfitBPS: -40,  // After 1% fees, becomes negative
+			name:         "at-threshold-boundary-negative-profit",
+			threshold:    0.995,
+			minTradeSize: 10.0,
+			maxTradeSize: 1000.0,
+			yesAsk:       0.497,
+			yesAskSize:   100.0,
+			noAsk:        0.497,
+			noAskSize:    100.0,
+			expectOpp:    false, // 0.994 < 0.995, but net profit is negative after fees (rejected)
 		},
 		{
 			name:         "below-min-trade-size",
 			threshold:    0.995,
 			minTradeSize: 100.0,
+			maxTradeSize: 1000.0,
 			yesAsk:       0.40,
 			yesAskSize:   50.0, // Below min
 			noAsk:        0.40,
@@ -68,6 +72,7 @@ func TestDetect(t *testing.T) {
 			name:               "large-arbitrage",
 			threshold:          0.995,
 			minTradeSize:       10.0,
+			maxTradeSize:       1000.0,
 			yesAsk:             0.30,
 			yesAskSize:         1000.0,
 			noAsk:              0.30,
@@ -79,6 +84,7 @@ func TestDetect(t *testing.T) {
 			name:               "asymmetric-sizes",
 			threshold:          0.995,
 			minTradeSize:       10.0,
+			maxTradeSize:       1000.0,
 			yesAsk:             0.45,
 			yesAskSize:         50.0, // Smaller
 			noAsk:              0.45,
@@ -90,11 +96,15 @@ func TestDetect(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create test market subscription
+			// Create test market subscription with Outcomes
 			market := &types.MarketSubscription{
 				MarketID:   "test-market",
 				MarketSlug: "test-slug",
 				Question:   "Test question?",
+				Outcomes: []types.OutcomeToken{
+					{TokenID: "yes-token", Outcome: "YES"},
+					{TokenID: "no-token", Outcome: "NO"},
+				},
 			}
 
 			// Create test orderbook snapshots
@@ -123,6 +133,7 @@ func TestDetect(t *testing.T) {
 				config: Config{
 					Threshold:    tt.threshold,
 					MinTradeSize: tt.minTradeSize,
+					MaxTradeSize: tt.maxTradeSize,
 					TakerFee:     takerFee,
 				},
 				logger: logger,

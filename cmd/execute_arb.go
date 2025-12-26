@@ -190,12 +190,12 @@ func runExecuteArb(cmd *cobra.Command, args []string) error {
 					fmt.Printf("Threshold: %.4f\n\n", threshold)
 
 					if priceSum >= threshold {
-						fmt.Printf("❌ No arbitrage opportunity (price sum %.4f >= threshold %.4f)\n", priceSum, threshold)
+						fmt.Printf("No arbitrage opportunity (price sum %.4f >= threshold %.4f)\n", priceSum, threshold)
 						fmt.Println("\nTip: Try a market with more price inefficiency, or adjust --threshold")
 						return nil
 					}
 
-					fmt.Printf("✅ Arbitrage opportunity detected!\n\n")
+					fmt.Printf("Arbitrage opportunity detected!\n\n")
 
 					// Use ASK prices and sizes for the opportunity
 					// In arbitrage, you buy at the ask price
@@ -215,8 +215,8 @@ func runExecuteArb(cmd *cobra.Command, args []string) error {
 
 					// Display results
 					fmt.Println("=== Trade Execution (Paper Mode) ===")
-					fmt.Printf("Buy YES at Ask: %.4f\n", opp.YesAskPrice)
-					fmt.Printf("Buy NO at Ask:  %.4f\n", opp.NoAskPrice)
+					fmt.Printf("Buy %s at Ask: %.4f\n", opp.Outcomes[0].Outcome, opp.Outcomes[0].AskPrice)
+					fmt.Printf("Buy %s at Ask:  %.4f\n", opp.Outcomes[1].Outcome, opp.Outcomes[1].AskPrice)
 					fmt.Printf("Trade Size: $%.2f\n\n", opp.MaxTradeSize)
 
 					fmt.Println("=== Profit Calculation ===")
@@ -225,17 +225,17 @@ func runExecuteArb(cmd *cobra.Command, args []string) error {
 					fmt.Printf("Net Profit:   $%.4f (%.2f BPS)\n\n", opp.NetProfit, float64(opp.NetProfitBPS))
 
 					if opp.NetProfit <= 0 {
-						fmt.Printf("⚠️  WARNING: Net profit is negative after fees!\n")
+						fmt.Printf("WARNING: Net profit is negative after fees!\n")
 						fmt.Printf("   This trade would lose money. The market spread is too narrow.\n\n")
 					} else {
-						fmt.Printf("✅ Profitable trade! Net profit: $%.4f\n\n", opp.NetProfit)
+						fmt.Printf("Profitable trade! Net profit: $%.4f\n\n", opp.NetProfit)
 					}
 
 					fmt.Println("=== Breakdown ===")
-					fmt.Printf("Total Cost:     $%.4f (%.4f + %.4f)\n", opp.YesAskPrice+opp.NoAskPrice, opp.YesAskPrice, opp.NoAskPrice)
+					fmt.Printf("Total Cost:     $%.4f (%.4f + %.4f)\n", opp.TotalPriceSum, opp.Outcomes[0].AskPrice, opp.Outcomes[1].AskPrice)
 					fmt.Printf("Payout:         $1.0000 (always pays $1 when both resolve)\n")
 					fmt.Printf("Profit Margin:  %.4f (1.0 - %.4f)\n", opp.ProfitMargin, priceSum)
-					fmt.Printf("ROI:            %.2f%%\n\n", (opp.NetProfit/(opp.YesAskPrice+opp.NoAskPrice))*100)
+					fmt.Printf("ROI:            %.2f%%\n\n", (opp.NetProfit/opp.TotalPriceSum)*100)
 
 					return nil
 				}

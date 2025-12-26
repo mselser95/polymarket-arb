@@ -56,7 +56,19 @@ func NewPostgresStorage(cfg *PostgresConfig) (*PostgresStorage, error) {
 }
 
 // StoreOpportunity stores an arbitrage opportunity in PostgreSQL.
+// NOTE: Postgres schema needs migration to support multi-outcome markets properly.
+// For now, storing summary data only (no individual outcome details).
 func (p *PostgresStorage) StoreOpportunity(ctx context.Context, opp *arbitrage.Opportunity) error {
+	// For backward compatibility with existing schema, store binary-equivalent data
+	// TODO: Migrate schema to support N outcomes with JSONB column
+	var firstPrice, secondPrice, firstSize, secondSize float64
+	if len(opp.Outcomes) >= 2 {
+		firstPrice = opp.Outcomes[0].AskPrice
+		firstSize = opp.Outcomes[0].AskSize
+		secondPrice = opp.Outcomes[1].AskPrice
+		secondSize = opp.Outcomes[1].AskSize
+	}
+
 	query := `
 		INSERT INTO arbitrage_opportunities (
 			id, market_id, market_slug, market_question, detected_at,
@@ -75,11 +87,11 @@ func (p *PostgresStorage) StoreOpportunity(ctx context.Context, opp *arbitrage.O
 		opp.MarketSlug,
 		opp.MarketQuestion,
 		opp.DetectedAt,
-		opp.YesAskPrice,
-		opp.YesAskSize,
-		opp.NoAskPrice,
-		opp.NoAskSize,
-		opp.PriceSum,
+		firstPrice,  // Reuse yes_bid_price column for first outcome
+		firstSize,   // Reuse yes_bid_size column for first outcome
+		secondPrice, // Reuse no_bid_price column for second outcome
+		secondSize,  // Reuse no_bid_size column for second outcome
+		opp.TotalPriceSum,
 		opp.ProfitMargin,
 		opp.ProfitBPS,
 		opp.MaxTradeSize,
@@ -96,7 +108,8 @@ func (p *PostgresStorage) StoreOpportunity(ctx context.Context, opp *arbitrage.O
 
 	p.logger.Debug("opportunity-stored",
 		zap.String("opportunity-id", opp.ID),
-		zap.String("market-slug", opp.MarketSlug))
+		zap.String("market-slug", opp.MarketSlug),
+		zap.Int("outcome-count", len(opp.Outcomes)))
 
 	return nil
 }

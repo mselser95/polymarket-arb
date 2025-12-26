@@ -32,9 +32,34 @@ func NewClient(baseURL string, logger *zap.Logger) *Client {
 	}
 }
 
-// FetchActiveMarkets fetches active markets from the Gamma API.
+const (
+	// MaxBatchSize is the maximum number of markets to fetch per API request.
+	// Based on Polymarket's official Python client implementation.
+	MaxBatchSize = 100
+)
+
+// FetchActiveMarkets fetches active markets from the Gamma API with automatic pagination.
+// If limit > MaxBatchSize, multiple requests are made and results are aggregated.
 // orderBy specifies the field to sort by: "volume24hr", "createdAt", or "endDate".
 func (c *Client) FetchActiveMarkets(ctx context.Context, limit int, offset int, orderBy string) (*types.MarketsResponse, error) {
+	// Handle unlimited: 0 means fetch all available markets
+	fetchAll := limit == 0
+
+	// If requesting more than one batch, use pagination
+	if limit > MaxBatchSize || fetchAll {
+		return c.fetchWithPagination(ctx, limit, offset, orderBy)
+	}
+
+	// Single request for small limits
+	return c.fetchSinglePage(ctx, limit, offset, orderBy)
+}
+
+// fetchSinglePage fetches a single page of markets without pagination.
+func (c *Client) fetchSinglePage(ctx context.Context, limit int, offset int, orderBy string) (*types.MarketsResponse, error) {
+	if limit == 0 {
+		limit = MaxBatchSize
+	}
+
 	endpoint := fmt.Sprintf("%s/markets", c.baseURL)
 
 	// Build query parameters
@@ -105,6 +130,84 @@ func (c *Client) FetchActiveMarkets(ctx context.Context, limit int, offset int, 
 	return marketsResp, nil
 }
 
+// fetchWithPagination fetches markets across multiple pages and aggregates results.
+// Automatically handles pagination when limit > MaxBatchSize or limit == 0 (fetch all).
+func (c *Client) fetchWithPagination(ctx context.Context, limit int, offset int, orderBy string) (*types.MarketsResponse, error) {
+	var (
+		allMarkets   []types.Market
+		currentPage  = 0
+		batchSize    = MaxBatchSize
+		totalFetched = 0
+		fetchAll     = limit == 0
+	)
+
+	c.logger.Debug("starting-paginated-fetch",
+		zap.Int("requested-limit", limit),
+		zap.Int("offset", offset),
+		zap.Int("batch-size", batchSize),
+		zap.Bool("fetch-all", fetchAll))
+
+	for {
+		// Calculate batch limit for this page
+		var pageBatchSize int
+		if fetchAll {
+			pageBatchSize = batchSize
+		} else {
+			remaining := limit - totalFetched
+			if remaining <= 0 {
+				break
+			}
+			if remaining < batchSize {
+				pageBatchSize = remaining
+			} else {
+				pageBatchSize = batchSize
+			}
+		}
+
+		// Calculate offset for this page
+		pageOffset := offset + (currentPage * batchSize)
+
+		// Fetch page
+		resp, err := c.fetchSinglePage(ctx, pageBatchSize, pageOffset, orderBy)
+		if err != nil {
+			return nil, fmt.Errorf("fetch page %d: %w", currentPage, err)
+		}
+
+		// Append results
+		allMarkets = append(allMarkets, resp.Data...)
+		totalFetched += len(resp.Data)
+
+		c.logger.Debug("fetched-page",
+			zap.Int("page", currentPage),
+			zap.Int("markets", len(resp.Data)),
+			zap.Int("total", totalFetched))
+
+		// Stop if we got fewer results than requested (no more data)
+		if len(resp.Data) < pageBatchSize {
+			c.logger.Debug("pagination-complete-no-more-data",
+				zap.Int("total-fetched", totalFetched))
+			break
+		}
+
+		// Stop if we've reached the requested limit
+		if !fetchAll && totalFetched >= limit {
+			c.logger.Debug("pagination-complete-limit-reached",
+				zap.Int("total-fetched", totalFetched),
+				zap.Int("requested", limit))
+			break
+		}
+
+		currentPage++
+	}
+
+	return &types.MarketsResponse{
+		Data:   allMarkets,
+		Count:  len(allMarkets),
+		Limit:  limit,
+		Offset: offset,
+	}, nil
+}
+
 // FetchMarketBySlug fetches a single market by its slug.
 // Note: The Gamma API doesn't support /markets/{slug}, only /markets/{id}.
 // This function searches through the markets list to find the matching slug.
@@ -115,7 +218,7 @@ func (c *Client) FetchMarketBySlug(ctx context.Context, slug string) (*types.Mar
 	offset := 0
 	maxPages := 10 // Search up to 1000 markets
 
-	for page := 0; page < maxPages; page++ {
+	for range maxPages {
 		resp, err := c.FetchActiveMarkets(ctx, limit, offset, "volume24hr")
 		if err != nil {
 			return nil, fmt.Errorf("fetch markets: %w", err)
@@ -137,4 +240,73 @@ func (c *Client) FetchMarketBySlug(ctx context.Context, slug string) (*types.Mar
 	}
 
 	return nil, fmt.Errorf("market not found: %s", slug)
+}
+
+// orderbookBid represents a bid in the orderbook.
+type orderbookBid struct {
+	Price string `json:"price"`
+	Size  string `json:"size"`
+}
+
+// orderbookResponse represents orderbook data from CLOB API.
+type orderbookResponse struct {
+	Market string         `json:"market"`
+	Bids   []orderbookBid `json:"bids"`
+}
+
+// FetchTokenBidPrice fetches the current best bid price for a specific token.
+func (c *Client) FetchTokenBidPrice(ctx context.Context, tokenID string) (bidPrice float64, err error) {
+	// Use CLOB API instead of Gamma API
+	clobURL := "https://clob.polymarket.com"
+	endpoint := fmt.Sprintf("%s/book?token_id=%s", clobURL, tokenID)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return 0, fmt.Errorf("create request: %w", err)
+	}
+
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "polymarket-arb/1.0")
+
+	c.logger.Debug("fetching-token-orderbook",
+		zap.String("url", endpoint),
+		zap.String("token_id", tokenID))
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("do request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return 0, fmt.Errorf("unexpected status code %d: %s", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, fmt.Errorf("read response body: %w", err)
+	}
+
+	var orderbook orderbookResponse
+	err = json.Unmarshal(body, &orderbook)
+	if err != nil {
+		return 0, fmt.Errorf("unmarshal response: %w", err)
+	}
+
+	// Get best bid (first bid in the list)
+	if len(orderbook.Bids) == 0 {
+		return 0, fmt.Errorf("no bids available in orderbook")
+	}
+
+	bidPrice, err = strconv.ParseFloat(orderbook.Bids[0].Price, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse bid price: %w", err)
+	}
+
+	c.logger.Debug("found-bid-price",
+		zap.String("token_id", tokenID),
+		zap.Float64("bid_price", bidPrice))
+
+	return bidPrice, nil
 }

@@ -69,6 +69,9 @@ func (a *App) shutdownHTTPServer(ctx context.Context) error {
 }
 
 func (a *App) shutdownExecutor() error {
+	if a.executor == nil {
+		return nil
+	}
 	return a.executor.Close()
 }
 
@@ -85,5 +88,5 @@ func (a *App) shutdownOrderbookManager() error {
 }
 
 func (a *App) shutdownWebSocketManager() error {
-	return a.wsManager.Close()
+	return a.wsPool.Close()
 }

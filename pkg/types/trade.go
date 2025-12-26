@@ -17,8 +17,9 @@ type ExecutionResult struct {
 	OpportunityID  string
 	MarketSlug     string
 	ExecutedAt     time.Time
-	YesTrade       *Trade
-	NoTrade        *Trade
+	YesTrade       *Trade    // For binary markets (backward compatibility)
+	NoTrade        *Trade    // For binary markets (backward compatibility)
+	AllTrades      []*Trade  // For all markets (binary + multi-outcome)
 	RealizedProfit float64
 	Success        bool
 	Error          error

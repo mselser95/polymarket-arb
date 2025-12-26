@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/mselser95/polymarket-arb/internal/arbitrage"
+	"github.com/mselser95/polymarket-arb/internal/circuitbreaker"
 	"github.com/mselser95/polymarket-arb/pkg/types"
 	"go.uber.org/zap"
 )
@@ -22,6 +23,7 @@ type Executor struct {
 	cumulativeProfit float64
 	mu               sync.Mutex
 	orderClient      *OrderClient // For live trading
+	circuitBreaker   *circuitbreaker.BalanceCircuitBreaker
 }
 
 // Config holds executor configuration.
@@ -30,7 +32,8 @@ type Config struct {
 	MaxPositionSize    float64
 	Logger             *zap.Logger
 	OpportunityChannel <-chan *arbitrage.Opportunity
-	OrderClient        *OrderClient // Optional: for live trading
+	OrderClient        *OrderClient                          // Optional: for live trading
+	CircuitBreaker     *circuitbreaker.BalanceCircuitBreaker // Optional: for balance monitoring
 }
 
 // New creates a new trade executor.
@@ -40,6 +43,7 @@ func New(cfg *Config) *Executor {
 		logger:          cfg.Logger,
 		opportunityChan: cfg.OpportunityChannel,
 		orderClient:     cfg.OrderClient,
+		circuitBreaker:  cfg.CircuitBreaker,
 	}
 }
 
@@ -72,6 +76,16 @@ func (e *Executor) executionLoop() {
 			// Track opportunity received
 			OpportunitiesReceived.Inc()
 
+			// Check circuit breaker before executing
+			if e.circuitBreaker != nil && !e.circuitBreaker.IsEnabled() {
+				e.logger.Warn("skipping-opportunity-circuit-breaker-disabled",
+					zap.String("opportunity-id", opp.ID),
+					zap.String("market-slug", opp.MarketSlug),
+					zap.Float64("spread", opp.ProfitMargin))
+				OpportunitiesSkippedTotal.WithLabelValues("circuit_breaker").Inc()
+				continue
+			}
+
 			start := time.Now()
 			result := e.execute(opp)
 			ExecutionDurationSeconds.Observe(time.Since(start).Seconds())
@@ -93,6 +107,11 @@ func (e *Executor) executionLoop() {
 					zap.String("opportunity-id", opp.ID),
 					zap.String("market-slug", opp.MarketSlug),
 					zap.Float64("profit", result.RealizedProfit))
+
+				// Record successful trade for circuit breaker threshold calculation
+				if e.circuitBreaker != nil && e.mode == "live" {
+					e.circuitBreaker.RecordTrade(opp.MaxTradeSize)
+				}
 			}
 		}
 	}
@@ -117,35 +136,29 @@ func (e *Executor) execute(opp *arbitrage.Opportunity) *types.ExecutionResult {
 }
 
 // executePaper executes a paper trade (simulated).
+// Supports both binary (2 outcomes) and multi-outcome (3+) markets.
 func (e *Executor) executePaper(opp *arbitrage.Opportunity) *types.ExecutionResult {
 	now := time.Now()
 
-	// Simulate buying YES and NO tokens at bid prices
-	yesTrade := &types.Trade{
-		Outcome:   "YES",
-		Side:      "BUY",
-		Price:     opp.YesAskPrice,
-		Size:      opp.MaxTradeSize,
-		Timestamp: now,
-	}
+	// Simulate buying all outcomes
+	trades := make([]*types.Trade, len(opp.Outcomes))
+	for i, outcome := range opp.Outcomes {
+		trades[i] = &types.Trade{
+			Outcome:   outcome.Outcome,
+			Side:      "BUY",
+			Price:     outcome.AskPrice,
+			Size:      opp.MaxTradeSize,
+			Timestamp: now,
+		}
 
-	noTrade := &types.Trade{
-		Outcome:   "NO",
-		Side:      "BUY",
-		Price:     opp.NoAskPrice,
-		Size:      opp.MaxTradeSize,
-		Timestamp: now,
+		// Update metrics for each outcome
+		TradesTotal.WithLabelValues("paper", outcome.Outcome).Inc()
 	}
 
 	// Calculate realized profit
-	// Cost: (yesBidPrice + noBidPrice) * size
-	// Value when market resolves: 1.0 * size (one side wins)
-	// Profit: size - (yesBidPrice + noBidPrice) * size = size * (1 - priceSum)
 	realizedProfit := opp.MaxTradeSize * opp.ProfitMargin
 
 	// Update metrics
-	TradesTotal.WithLabelValues("paper", "YES").Inc()
-	TradesTotal.WithLabelValues("paper", "NO").Inc()
 	ProfitRealizedUSD.WithLabelValues("paper").Add(realizedProfit)
 
 	// Update cumulative profit
@@ -154,29 +167,53 @@ func (e *Executor) executePaper(opp *arbitrage.Opportunity) *types.ExecutionResu
 	cumulativeProfit := e.cumulativeProfit
 	e.mu.Unlock()
 
-	e.logger.Info("paper-trade-executed",
+	// Build log fields for all outcomes
+	outcomeFields := make([]zap.Field, 0, len(opp.Outcomes))
+	for i, outcome := range opp.Outcomes {
+		outcomeFields = append(outcomeFields,
+			zap.Float64(fmt.Sprintf("outcome%d-price", i+1), outcome.AskPrice),
+			zap.String(fmt.Sprintf("outcome%d-name", i+1), outcome.Outcome))
+	}
+
+	baseFields := []zap.Field{
 		zap.String("market-slug", opp.MarketSlug),
 		zap.String("question", opp.MarketQuestion),
-		zap.Float64("yes-price", opp.YesAskPrice),
-		zap.Float64("no-price", opp.NoAskPrice),
+		zap.Int("outcome-count", len(opp.Outcomes)),
 		zap.Float64("size", opp.MaxTradeSize),
 		zap.Int("profit-bps", opp.ProfitBPS),
 		zap.Float64("profit-usd", realizedProfit),
-		zap.Float64("cumulative-profit-usd", cumulativeProfit))
+		zap.Float64("cumulative-profit-usd", cumulativeProfit),
+	}
 
-	return &types.ExecutionResult{
+	e.logger.Info("paper-trade-executed", append(baseFields, outcomeFields...)...)
+
+	// Create execution result
+	result := &types.ExecutionResult{
 		OpportunityID:  opp.ID,
 		MarketSlug:     opp.MarketSlug,
 		ExecutedAt:     now,
-		YesTrade:       yesTrade,
-		NoTrade:        noTrade,
 		RealizedProfit: realizedProfit,
 		Success:        true,
 		Error:          nil,
+		AllTrades:      trades, // Store all trades
 	}
+
+	// For backward compatibility with binary markets, set YesTrade/NoTrade
+	if len(trades) == 2 {
+		result.YesTrade = trades[0]
+		result.NoTrade = trades[1]
+	}
+
+	return result
 }
 
 // executeLive executes a live trade via Polymarket CLOB API.
+// LIMITATION: Currently only supports binary markets (2 outcomes) due to PlaceOrdersBatch API.
+// Multi-outcome markets would require either:
+// - Sequential order placement (higher latency, partial fill risk)
+// - Polymarket CLOB batch API for N orders (not yet implemented)
+//
+// Use paper mode for testing multi-outcome markets.
 func (e *Executor) executeLive(opp *arbitrage.Opportunity) *types.ExecutionResult {
 	now := time.Now()
 
@@ -191,8 +228,30 @@ func (e *Executor) executeLive(opp *arbitrage.Opportunity) *types.ExecutionResul
 		}
 	}
 
-	// Get token IDs from opportunity
-	if opp.YesTokenID == "" || opp.NoTokenID == "" {
+	// Only execute binary markets (2 outcomes) in live mode
+	if len(opp.Outcomes) != 2 {
+		e.logger.Info("skipping-multi-outcome-live-execution",
+			zap.String("opportunity-id", opp.ID),
+			zap.String("market-slug", opp.MarketSlug),
+			zap.Int("outcome-count", len(opp.Outcomes)),
+			zap.Float64("net-profit-usd", opp.NetProfit),
+			zap.String("reason", "live execution requires batch API for N>2 outcomes"))
+		OpportunitiesSkippedTotal.WithLabelValues("multi_outcome_live").Inc()
+		return &types.ExecutionResult{
+			OpportunityID: opp.ID,
+			MarketSlug:    opp.MarketSlug,
+			ExecutedAt:    now,
+			Success:       false,
+			Error:         fmt.Errorf("live execution only supports binary markets (got %d outcomes) - use paper mode for multi-outcome", len(opp.Outcomes)),
+		}
+	}
+
+	// Extract binary outcomes
+	outcome1 := opp.Outcomes[0]
+	outcome2 := opp.Outcomes[1]
+
+	// Get token IDs from outcomes
+	if outcome1.TokenID == "" || outcome2.TokenID == "" {
 		e.logger.Error("missing-token-ids")
 		return &types.ExecutionResult{
 			OpportunityID: opp.ID,
@@ -203,13 +262,10 @@ func (e *Executor) executeLive(opp *arbitrage.Opportunity) *types.ExecutionResul
 		}
 	}
 
-	yesTokenID := opp.YesTokenID
-	noTokenID := opp.NoTokenID
-
 	e.logger.Info("placing-orders",
 		zap.String("market-slug", opp.MarketSlug),
-		zap.Float64("yes-price", opp.YesAskPrice),
-		zap.Float64("no-price", opp.NoAskPrice),
+		zap.Float64("outcome1-price", outcome1.AskPrice),
+		zap.Float64("outcome2-price", outcome2.AskPrice),
 		zap.Float64("size", opp.MaxTradeSize))
 
 	// Place orders using batch endpoint for atomic submission
@@ -218,15 +274,15 @@ func (e *Executor) executeLive(opp *arbitrage.Opportunity) *types.ExecutionResul
 
 	yesResp, noResp, err := e.orderClient.PlaceOrdersBatch(
 		ctx,
-		yesTokenID,
-		noTokenID,
+		outcome1.TokenID,
+		outcome2.TokenID,
 		opp.MaxTradeSize,
-		opp.YesAskPrice,
-		opp.NoAskPrice,
-		opp.YesTickSize,
-		opp.YesMinSize,
-		opp.NoTickSize,
-		opp.NoMinSize,
+		outcome1.AskPrice,
+		outcome2.AskPrice,
+		outcome1.TickSize,
+		outcome1.MinSize,
+		outcome2.TickSize,
+		outcome2.MinSize,
 	)
 
 	if err != nil {
@@ -290,19 +346,19 @@ func (e *Executor) executeLive(opp *arbitrage.Opportunity) *types.ExecutionResul
 
 	// Create trade records using opportunity data
 	// Note: OrderSubmissionResponse doesn't include price/size, so we use the opportunity values
-	yesTrade := &types.Trade{
-		Outcome:   "YES",
+	trade1 := &types.Trade{
+		Outcome:   outcome1.Outcome,
 		Side:      "BUY",
-		Price:     opp.YesAskPrice,     // Use opportunity price
-		Size:      opp.MaxTradeSize,    // Use opportunity size
+		Price:     outcome1.AskPrice,
+		Size:      opp.MaxTradeSize,
 		Timestamp: now,
 	}
 
-	noTrade := &types.Trade{
-		Outcome:   "NO",
+	trade2 := &types.Trade{
+		Outcome:   outcome2.Outcome,
 		Side:      "BUY",
-		Price:     opp.NoAskPrice,      // Use opportunity price
-		Size:      opp.MaxTradeSize,    // Use opportunity size
+		Price:     outcome2.AskPrice,
+		Size:      opp.MaxTradeSize,
 		Timestamp: now,
 	}
 
@@ -310,8 +366,8 @@ func (e *Executor) executeLive(opp *arbitrage.Opportunity) *types.ExecutionResul
 	realizedProfit := opp.MaxTradeSize * opp.ProfitMargin
 
 	// Update metrics
-	TradesTotal.WithLabelValues("live", "YES").Inc()
-	TradesTotal.WithLabelValues("live", "NO").Inc()
+	TradesTotal.WithLabelValues("live", outcome1.Outcome).Inc()
+	TradesTotal.WithLabelValues("live", outcome2.Outcome).Inc()
 	ProfitRealizedUSD.WithLabelValues("live").Add(realizedProfit)
 
 	// Update cumulative profit
@@ -322,12 +378,12 @@ func (e *Executor) executeLive(opp *arbitrage.Opportunity) *types.ExecutionResul
 
 	e.logger.Info("live-trade-executed",
 		zap.String("market-slug", opp.MarketSlug),
-		zap.String("yes-order-id", yesResp.OrderID),
-		zap.String("yes-status", yesResp.Status),
-		zap.String("no-order-id", noResp.OrderID),
-		zap.String("no-status", noResp.Status),
-		zap.Float64("yes-price", opp.YesAskPrice),
-		zap.Float64("no-price", opp.NoAskPrice),
+		zap.String("order1-id", yesResp.OrderID),
+		zap.String("order1-status", yesResp.Status),
+		zap.String("order2-id", noResp.OrderID),
+		zap.String("order2-status", noResp.Status),
+		zap.Float64("outcome1-price", outcome1.AskPrice),
+		zap.Float64("outcome2-price", outcome2.AskPrice),
 		zap.Float64("size", opp.MaxTradeSize),
 		zap.Int("profit-bps", opp.ProfitBPS),
 		zap.Float64("profit-usd", realizedProfit),
@@ -337,8 +393,8 @@ func (e *Executor) executeLive(opp *arbitrage.Opportunity) *types.ExecutionResul
 		OpportunityID:  opp.ID,
 		MarketSlug:     opp.MarketSlug,
 		ExecutedAt:     now,
-		YesTrade:       yesTrade,
-		NoTrade:        noTrade,
+		YesTrade:       trade1,
+		NoTrade:        trade2,
 		RealizedProfit: realizedProfit,
 		Success:        true,
 		Error:          nil,

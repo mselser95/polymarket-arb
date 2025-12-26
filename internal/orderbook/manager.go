@@ -67,10 +67,17 @@ func (m *Manager) processMessages() {
 
 			err := m.handleMessage(msg)
 			if err != nil {
-				m.logger.Warn("handle-message-error",
-					zap.Error(err),
-					zap.String("event-type", msg.EventType),
-					zap.String("asset-id", msg.AssetID))
+				// Log empty orderbooks at debug level (common for illiquid markets)
+				if err.Error() == "extract best bid: no price levels" || err.Error() == "extract best ask: no price levels" {
+					m.logger.Debug("orderbook-empty",
+						zap.String("event-type", msg.EventType),
+						zap.String("asset-id", msg.AssetID))
+				} else {
+					m.logger.Warn("handle-message-error",
+						zap.Error(err),
+						zap.String("event-type", msg.EventType),
+						zap.String("asset-id", msg.AssetID))
+				}
 			}
 		}
 	}

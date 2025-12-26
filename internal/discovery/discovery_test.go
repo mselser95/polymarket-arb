@@ -617,3 +617,205 @@ func TestService_PollSingleMarket(t *testing.T) {
 		t.Errorf("expected 1 subscribed market, got %d", len(subs))
 	}
 }
+
+func TestClient_FetchActiveMarkets_UnlimitedLimit(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	requestCount := 0
+
+	// Create mock server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+
+		// With limit=0, should use pagination with MaxBatchSize
+		limit := r.URL.Query().Get("limit")
+		if limit != "100" {
+			t.Errorf("expected limit to be 100 (MaxBatchSize) when 0 is passed, got %s", limit)
+		}
+
+		// Return mock response (only 1 market, so pagination stops)
+		markets := []types.Market{
+			{
+				ID:         "market1",
+				Slug:       "market-1",
+				Question:   "Will X happen?",
+				Outcomes:   `["Yes", "No"]`,
+				ClobTokens: `["token1", "token2"]`,
+			},
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(markets)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, logger)
+	ctx := context.Background()
+
+	// Pass limit=0 (unlimited) - should trigger pagination
+	resp, err := client.FetchActiveMarkets(ctx, 0, 0, "volume24hr")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if resp.Count != 1 {
+		t.Errorf("expected count 1, got %d", resp.Count)
+	}
+
+	if len(resp.Data) != 1 {
+		t.Errorf("expected 1 market, got %d", len(resp.Data))
+	}
+
+	// Should make only 1 request since first page returned < MaxBatchSize
+	if requestCount != 1 {
+		t.Errorf("expected 1 request, got %d", requestCount)
+	}
+}
+
+func TestService_identifyNewMarkets_UnlimitedDuration(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+
+	// Set maxMarketDuration to 0 (unlimited)
+	svc := &Service{
+		logger:            logger,
+		subscribed:        make(map[string]*types.MarketSubscription),
+		maxMarketDuration: 0, // Unlimited - no duration filtering
+	}
+
+	// Create markets with various end dates
+	now := time.Now()
+	markets := []types.Market{
+		{
+			ID:       "market1",
+			Slug:     "market-expires-soon",
+			Question: "Expires in 1 hour",
+			EndDate:  now.Add(1 * time.Hour),
+			Tokens: []types.Token{
+				{TokenID: "token1", Outcome: "YES"},
+				{TokenID: "token2", Outcome: "NO"},
+			},
+		},
+		{
+			ID:       "market2",
+			Slug:     "market-expires-far",
+			Question: "Expires in 30 days",
+			EndDate:  now.Add(30 * 24 * time.Hour),
+			Tokens: []types.Token{
+				{TokenID: "token3", Outcome: "YES"},
+				{TokenID: "token4", Outcome: "NO"},
+			},
+		},
+		{
+			ID:       "market3",
+			Slug:     "market-expires-very-far",
+			Question: "Expires in 1 year",
+			EndDate:  now.Add(365 * 24 * time.Hour),
+			Tokens: []types.Token{
+				{TokenID: "token5", Outcome: "YES"},
+				{TokenID: "token6", Outcome: "NO"},
+			},
+		},
+	}
+
+	newMarkets := svc.identifyNewMarkets(markets)
+
+	// With unlimited duration (0), all markets should be accepted regardless of end date
+	if len(newMarkets) != 3 {
+		t.Errorf("expected 3 new markets with unlimited duration, got %d", len(newMarkets))
+	}
+
+	// Verify all markets are tracked
+	svc.mu.RLock()
+	if len(svc.subscribed) != 3 {
+		t.Errorf("expected 3 subscribed markets, got %d", len(svc.subscribed))
+	}
+
+	if _, exists := svc.subscribed["market-expires-soon"]; !exists {
+		t.Error("expected market-expires-soon to be subscribed")
+	}
+
+	if _, exists := svc.subscribed["market-expires-far"]; !exists {
+		t.Error("expected market-expires-far to be subscribed")
+	}
+
+	if _, exists := svc.subscribed["market-expires-very-far"]; !exists {
+		t.Error("expected market-expires-very-far to be subscribed")
+	}
+	svc.mu.RUnlock()
+}
+
+func TestService_identifyNewMarkets_WithDurationFilter(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+
+	// Set maxMarketDuration to 24 hours (filtering enabled)
+	svc := &Service{
+		logger:            logger,
+		subscribed:        make(map[string]*types.MarketSubscription),
+		maxMarketDuration: 24 * time.Hour, // Filter markets expiring > 24 hours
+	}
+
+	// Create markets with various end dates
+	now := time.Now()
+	markets := []types.Market{
+		{
+			ID:       "market1",
+			Slug:     "market-expires-soon",
+			Question: "Expires in 1 hour",
+			EndDate:  now.Add(1 * time.Hour),
+			Tokens: []types.Token{
+				{TokenID: "token1", Outcome: "YES"},
+				{TokenID: "token2", Outcome: "NO"},
+			},
+		},
+		{
+			ID:       "market2",
+			Slug:     "market-expires-far",
+			Question: "Expires in 30 days",
+			EndDate:  now.Add(30 * 24 * time.Hour),
+			Tokens: []types.Token{
+				{TokenID: "token3", Outcome: "YES"},
+				{TokenID: "token4", Outcome: "NO"},
+			},
+		},
+		{
+			ID:       "market3",
+			Slug:     "market-expires-expired",
+			Question: "Already expired",
+			EndDate:  now.Add(-1 * time.Hour), // Already expired
+			Tokens: []types.Token{
+				{TokenID: "token5", Outcome: "YES"},
+				{TokenID: "token6", Outcome: "NO"},
+			},
+		},
+	}
+
+	newMarkets := svc.identifyNewMarkets(markets)
+
+	// With 24h duration filter, only market1 should pass
+	// market2 expires too far in future, market3 already expired
+	if len(newMarkets) != 1 {
+		t.Errorf("expected 1 new market with 24h duration filter, got %d", len(newMarkets))
+	}
+
+	if len(newMarkets) > 0 && newMarkets[0].Slug != "market-expires-soon" {
+		t.Errorf("expected market-expires-soon, got %s", newMarkets[0].Slug)
+	}
+
+	// Verify only market1 is tracked
+	svc.mu.RLock()
+	if len(svc.subscribed) != 1 {
+		t.Errorf("expected 1 subscribed market, got %d", len(svc.subscribed))
+	}
+
+	if _, exists := svc.subscribed["market-expires-soon"]; !exists {
+		t.Error("expected market-expires-soon to be subscribed")
+	}
+
+	if _, exists := svc.subscribed["market-expires-far"]; exists {
+		t.Error("expected market-expires-far to not be subscribed (filtered by duration)")
+	}
+
+	if _, exists := svc.subscribed["market-expires-expired"]; exists {
+		t.Error("expected market-expires-expired to not be subscribed (already expired)")
+	}
+	svc.mu.RUnlock()
+}

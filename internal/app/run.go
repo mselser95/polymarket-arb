@@ -95,7 +95,7 @@ func (a *App) runDiscoveryService() {
 }
 
 func (a *App) startWebSocketManager() error {
-	return a.wsManager.Start()
+	return a.wsPool.Start()
 }
 
 func (a *App) startOrderbookManager() error {
@@ -107,6 +107,13 @@ func (a *App) startArbitrageDetector() error {
 }
 
 func (a *App) startExecutor() error {
+	if a.executor == nil {
+		a.logger.Info("executor-not-started",
+			zap.String("mode", a.cfg.ExecutionMode),
+			zap.String("reason", "dry-run mode - detection only"))
+		return nil
+	}
+
 	return a.executor.Start(a.ctx)
 }
 

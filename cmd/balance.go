@@ -158,11 +158,11 @@ func runBalance(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\n=== Summary ===\n")
 	fmt.Printf("Ready to trade: ")
 	if usdcBalance.Cmp(big.NewInt(1000000)) >= 0 && allowance.Cmp(big.NewInt(0)) > 0 {
-		fmt.Printf("✅ YES\n")
+		fmt.Printf("YES\n")
 		fmt.Printf("\nYou can place orders:\n")
 		fmt.Printf("  go run . place-orders <market> --size 1.0 --yes-price 0.50 --no-price 0.50\n")
 	} else {
-		fmt.Printf("❌ NO\n")
+		fmt.Printf("NO\n")
 		if usdcBalance.Cmp(big.NewInt(1000000)) < 0 {
 			fmt.Printf("  - Need more USDC (minimum $1.00)\n")
 		}

@@ -22,7 +22,7 @@ type App struct {
 	healthChecker    *healthprobe.HealthChecker
 	httpServer       *httpserver.Server
 	discoveryService *discovery.Service
-	wsManager        *websocket.Manager
+	wsPool           *websocket.Pool
 	obManager        *orderbook.Manager
 	arbDetector      *arbitrage.Detector
 	executor         *execution.Executor

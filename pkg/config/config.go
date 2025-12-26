@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -23,8 +24,13 @@ type Config struct {
 	// Market Discovery
 	DiscoveryPollInterval time.Duration
 	DiscoveryMarketLimit  int
+	MaxMarketDuration     time.Duration // Only subscribe to markets expiring within this duration
+
+	// Market Cleanup
+	CleanupInterval time.Duration // How often cleanup command checks for stale markets
 
 	// WebSocket
+	WSPoolSize              int // Number of WebSocket connections (default: 5)
 	WSDialTimeout           time.Duration
 	WSPongTimeout           time.Duration
 	WSPingInterval          time.Duration
@@ -36,6 +42,7 @@ type Config struct {
 	// Arbitrage Detection
 	ArbThreshold         float64
 	ArbMinTradeSize      float64
+	ArbMaxTradeSize      float64
 	ArbDetectionInterval time.Duration
 	ArbMakerFee          float64
 	ArbTakerFee          float64
@@ -43,6 +50,13 @@ type Config struct {
 	// Execution
 	ExecutionMode            string
 	ExecutionMaxPositionSize float64
+
+	// Circuit Breaker
+	CircuitBreakerEnabled         bool
+	CircuitBreakerCheckInterval   time.Duration
+	CircuitBreakerTradeMultiplier float64
+	CircuitBreakerMinAbsolute     float64
+	CircuitBreakerHysteresisRatio float64
 
 	// Storage
 	StorageMode  string // "postgres" or "console"
@@ -70,9 +84,14 @@ func LoadFromEnv() (*Config, error) {
 
 		// Market Discovery defaults
 		DiscoveryPollInterval: getDurationOrDefault("DISCOVERY_POLL_INTERVAL", 30*time.Second),
-		DiscoveryMarketLimit:  getIntOrDefault("DISCOVERY_MARKET_LIMIT", 50),
+		DiscoveryMarketLimit:  getIntOrDefault("DISCOVERY_MARKET_LIMIT", 1000),
+		MaxMarketDuration:     getDurationOrDefault("ARB_MAX_MARKET_DURATION", 0), // 0 = unlimited
+
+		// Market Cleanup defaults
+		CleanupInterval: getDurationOrDefault("CLEANUP_CHECK_INTERVAL", 5*time.Minute),
 
 		// WebSocket defaults
+		WSPoolSize:              getIntOrDefault("WS_POOL_SIZE", 5),
 		WSDialTimeout:           getDurationOrDefault("WS_DIAL_TIMEOUT", 10*time.Second),
 		WSPongTimeout:           getDurationOrDefault("WS_PONG_TIMEOUT", 15*time.Second),
 		WSPingInterval:          getDurationOrDefault("WS_PING_INTERVAL", 10*time.Second),
@@ -83,7 +102,8 @@ func LoadFromEnv() (*Config, error) {
 
 		// Arbitrage defaults
 		ArbThreshold:         getFloat64OrDefault("ARB_THRESHOLD", 0.995),
-		ArbMinTradeSize:      getFloat64OrDefault("ARB_MIN_TRADE_SIZE", 10.0),
+		ArbMinTradeSize:      getFloat64OrDefault("ARB_MIN_TRADE_SIZE", 1.0),
+		ArbMaxTradeSize:      getFloat64OrDefault("ARB_MAX_TRADE_SIZE", 2.0),
 		ArbDetectionInterval: getDurationOrDefault("ARB_DETECTION_INTERVAL", 100*time.Millisecond),
 		ArbMakerFee:          getFloat64OrDefault("ARB_MAKER_FEE", 0.0000), // 0% maker fee on Polymarket
 		ArbTakerFee:          getFloat64OrDefault("ARB_TAKER_FEE", 0.0100), // 1% taker fee
@@ -91,6 +111,13 @@ func LoadFromEnv() (*Config, error) {
 		// Execution defaults
 		ExecutionMode:            getEnvOrDefault("EXECUTION_MODE", "paper"),
 		ExecutionMaxPositionSize: getFloat64OrDefault("EXECUTION_MAX_POSITION_SIZE", 1000.0),
+
+		// Circuit Breaker defaults
+		CircuitBreakerEnabled:         getBoolOrDefault("CIRCUIT_BREAKER_ENABLED", true),
+		CircuitBreakerCheckInterval:   getDurationOrDefault("CIRCUIT_BREAKER_CHECK_INTERVAL", 300*time.Second),
+		CircuitBreakerTradeMultiplier: getFloat64OrDefault("CIRCUIT_BREAKER_TRADE_MULTIPLIER", 3.0),
+		CircuitBreakerMinAbsolute:     getFloat64OrDefault("CIRCUIT_BREAKER_MIN_ABSOLUTE", 5.0),
+		CircuitBreakerHysteresisRatio: getFloat64OrDefault("CIRCUIT_BREAKER_HYSTERESIS_RATIO", 1.5),
 
 		// Storage defaults
 		StorageMode:  getEnvOrDefault("STORAGE_MODE", "console"),
@@ -111,25 +138,62 @@ func LoadFromEnv() (*Config, error) {
 }
 
 // Validate checks that configuration values are valid.
-func (c *Config) Validate() error {
+func (c *Config) Validate() (err error) {
 	if c.HTTPPort == "" {
-		return fmt.Errorf("HTTP_PORT cannot be empty")
+		return errors.New("HTTP_PORT cannot be empty")
 	}
 
 	if c.PolymarketWSURL == "" {
-		return fmt.Errorf("POLYMARKET_WS_URL cannot be empty")
+		return errors.New("POLYMARKET_WS_URL cannot be empty")
 	}
 
 	if c.PolymarketGammaURL == "" {
-		return fmt.Errorf("POLYMARKET_GAMMA_API_URL cannot be empty")
+		return errors.New("POLYMARKET_GAMMA_API_URL cannot be empty")
 	}
 
 	if c.ArbThreshold <= 0 || c.ArbThreshold >= 1.0 {
 		return fmt.Errorf("ARB_THRESHOLD must be between 0 and 1.0, got %f", c.ArbThreshold)
 	}
 
-	if c.ExecutionMode != "paper" && c.ExecutionMode != "live" {
-		return fmt.Errorf("EXECUTION_MODE must be 'paper' or 'live', got %q", c.ExecutionMode)
+	if c.ExecutionMode != "paper" && c.ExecutionMode != "live" && c.ExecutionMode != "dry-run" {
+		return fmt.Errorf("EXECUTION_MODE must be 'paper', 'live', or 'dry-run', got %q", c.ExecutionMode)
+	}
+
+	// Validate trade size configuration
+	if c.ArbMinTradeSize <= 0 {
+		return fmt.Errorf("ARB_MIN_TRADE_SIZE must be positive, got %f", c.ArbMinTradeSize)
+	}
+
+	if c.ArbMaxTradeSize <= 0 {
+		return fmt.Errorf("ARB_MAX_TRADE_SIZE must be positive, got %f", c.ArbMaxTradeSize)
+	}
+
+	if c.ArbMaxTradeSize < c.ArbMinTradeSize {
+		return fmt.Errorf("ARB_MAX_TRADE_SIZE (%f) must be >= ARB_MIN_TRADE_SIZE (%f)",
+			c.ArbMaxTradeSize, c.ArbMinTradeSize)
+	}
+
+	// Validate market filtering configuration
+	if c.MaxMarketDuration < 0 {
+		return fmt.Errorf("ARB_MAX_MARKET_DURATION must be non-negative (0 = unlimited), got %s", c.MaxMarketDuration)
+	}
+
+	if c.DiscoveryMarketLimit < 0 {
+		return fmt.Errorf("DISCOVERY_MARKET_LIMIT must be non-negative (0 = unlimited), got %d", c.DiscoveryMarketLimit)
+	}
+
+	// Validate WebSocket pool configuration
+	if c.WSPoolSize < 1 {
+		return fmt.Errorf("WS_POOL_SIZE must be at least 1, got %d", c.WSPoolSize)
+	}
+
+	if c.WSPoolSize > 20 {
+		return fmt.Errorf("WS_POOL_SIZE must not exceed 20, got %d", c.WSPoolSize)
+	}
+
+	// Validate cleanup configuration
+	if c.CleanupInterval <= 0 {
+		return fmt.Errorf("CLEANUP_CHECK_INTERVAL must be positive, got %s", c.CleanupInterval)
 	}
 
 	return nil
@@ -183,4 +247,18 @@ func getDurationOrDefault(key string, defaultValue time.Duration) time.Duration 
 	}
 
 	return duration
+}
+
+func getBoolOrDefault(key string, defaultValue bool) bool {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+
+	boolVal, err := strconv.ParseBool(value)
+	if err != nil {
+		return defaultValue
+	}
+
+	return boolVal
 }

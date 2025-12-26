@@ -270,21 +270,32 @@ if yesTokens < yesMinSize || noTokens < noMinSize {
 #### 5. Executor (`internal/execution/`)
 
 **Responsibilities:**
-- Execute trades based on opportunities
+- Execute trades based on opportunities (paper/live modes)
 - Track cumulative profit
 - Emit metrics
-- Handle both paper and live trading modes
+- Skipped entirely in dry-run mode
+
+**Execution Modes:**
+
+**Dry-Run (Detection Only):**
+- Executor not initialized
+- Only detects and logs opportunities
+- No trade execution (not even simulated)
+- Use for: Market monitoring, testing detection logic
 
 **Paper Trading:**
 - Logs simulated trades to console
 - Tracks hypothetical profit
+- Updates execution metrics
 - No API calls made
+- Use for: Strategy testing, full flow validation
 
 **Live Trading:**
 - Submits orders via CLOB API
 - Signs requests with private key
 - Handles order responses and errors
 - Validates order size before submission
+- Use for: Production trading (requires credentials)
 
 #### 6. Market Metadata System (`internal/markets/`)
 
@@ -390,7 +401,7 @@ POLYMARKET_CLOB_API_URL=https://clob.polymarket.com
 
 # Discovery Service
 DISCOVERY_POLL_INTERVAL=30s           # How often to check for new markets
-DISCOVERY_MARKET_LIMIT=50             # Max markets to track simultaneously
+DISCOVERY_MARKET_LIMIT=100            # Max markets to track simultaneously (default: 100)
 
 # WebSocket Configuration
 WS_DIAL_TIMEOUT=10s                   # Connection timeout
@@ -403,13 +414,14 @@ WS_RECONNECT_MAX_DELAY=32s            # Max reconnection delay
 
 # Arbitrage Detection
 ARB_THRESHOLD=0.995                   # Detect when YES + NO < 0.995
-ARB_MIN_TRADE_SIZE=10.0               # Minimum $10 USDC trade
+ARB_MIN_TRADE_SIZE=1.0                # Minimum $1 USDC trade
+ARB_MAX_TRADE_SIZE=2.0                # Maximum $2 USDC trade (caps calculated size)
 ARB_TAKER_FEE=0.01                    # 1% taker fee (0.01 = 1%)
 
 # Execution
-EXECUTION_MODE=paper                  # paper or live
-EXECUTION_MAX_POSITION_SIZE=1000.0    # Max $1000 per trade
-EXECUTION_RATE_LIMIT=10               # Max 10 trades per minute
+EXECUTION_MODE=dry-run                # dry-run, paper, or live
+EXECUTION_MAX_POSITION_SIZE=1000.0    # Max $1000 per trade (paper/live only)
+EXECUTION_RATE_LIMIT=10               # Max 10 trades per minute (live only)
 
 # Storage
 STORAGE_MODE=console                  # console or postgres
@@ -651,7 +663,53 @@ Most test orders are rejected because:
 
 ## Trading Workflow
 
-### Paper Trading (Recommended for Testing)
+### Dry-Run Mode (Detection Only - Safest)
+
+Dry-run mode monitors markets and detects opportunities without any execution.
+
+```bash
+# Run in dry-run mode
+EXECUTION_MODE=dry-run go run . run
+
+# Or set in .env
+echo "EXECUTION_MODE=dry-run" >> .env
+make run
+```
+
+**What happens:**
+1. Bot monitors active markets via WebSocket
+2. Detects arbitrage opportunities
+3. Logs opportunities to console:
+   ```
+   ========================================
+   Arbitrage Opportunity Detected
+   ========================================
+   ID:               opp_abc123
+   Market:           will-bitcoin-hit-100k
+   Question:         Will Bitcoin hit $100k?
+   ----------------------------------------
+   Prices:
+     YES ASK:        0.4800
+     NO ASK:         0.4800
+     Total Cost:     0.9600 < 0.9950 (threshold)
+   ----------------------------------------
+   Profit Analysis:
+     Max Size:       $50.00
+     Gross Profit:   $40.00 (400 bps)
+     Fees (1%):      $0.96
+     Net Profit:     $39.04 (390 bps)
+   ========================================
+   ```
+4. **NO execution** (not even simulated)
+5. Tracks detector metrics only
+
+**Use for:**
+- Market research and monitoring
+- Testing detection logic and thresholds
+- Debugging configuration issues
+- Safe exploration without any risk
+
+### Paper Trading (Simulation Mode)
 
 Paper trading simulates trades without sending real orders.
 
@@ -750,6 +808,26 @@ go run .
    Expected profit: $0.60 (3%)
    ```
 
+### Execution Mode Comparison
+
+| Feature | Dry-Run | Paper | Live |
+|---------|---------|-------|------|
+| **Detects Opportunities** | ✅ | ✅ | ✅ |
+| **Logs Opportunities** | ✅ | ✅ | ✅ |
+| **Simulates Execution** | ❌ | ✅ | ❌ |
+| **Places Real Orders** | ❌ | ❌ | ✅ |
+| **Updates Execution Metrics** | ❌ | ✅ | ✅ |
+| **Tracks Profit** | ❌ | ✅ (simulated) | ✅ (real) |
+| **Requires API Credentials** | ❌ | ❌ | ✅ |
+| **Requires USDC Balance** | ❌ | ❌ | ✅ |
+| **Risk Level** | None | None | High |
+| **Best For** | Monitoring, research | Testing, validation | Production |
+
+**Progression Path:**
+1. Start with **dry-run** to understand opportunity frequency
+2. Move to **paper** to test execution logic
+3. Advance to **live** with small position sizes
+
 #### Risk Management
 
 **Start Conservative:**
@@ -772,10 +850,13 @@ EXECUTION_COOLDOWN=10s         # 10s between opportunities
 - Track cumulative profit in metrics
 
 **Common Issues:**
-- **"Size lower than minimum"**: Increase `ARB_MIN_TRADE_SIZE`
+- **"Size lower than minimum"**: Increase `ARB_MIN_TRADE_SIZE` or check per-market minimums
+- **"No opportunities detected"**: Check `ARB_MAX_TRADE_SIZE >= ARB_MIN_TRADE_SIZE`
+- **"Trades smaller than expected"**: `ARB_MAX_TRADE_SIZE` is capping calculated size (set `LOG_LEVEL=debug`)
 - **"Insufficient balance"**: Check `go run . balance`
 - **"Invalid signature"**: Verify `POLYMARKET_PRIVATE_KEY`
 - **"Rate limit exceeded"**: Reduce `EXECUTION_RATE_LIMIT`
+- **"Empty orderbook warnings"**: Normal for illiquid markets (logged at debug level only)
 
 ## Market Metadata System
 
@@ -1255,10 +1336,10 @@ go tool pprof goroutine.prof
    ARB_THRESHOLD=0.98 go run .  # 2% spread
    ```
 
-2. **Min trade size too high**
+2. **Min/max trade size misconfigured**
    ```bash
-   # Check available liquidity
-   ARB_MIN_TRADE_SIZE=5.0 go run .
+   # Check trade size configuration
+   ARB_MIN_TRADE_SIZE=1.0 ARB_MAX_TRADE_SIZE=10.0 go run .
    ```
 
 3. **Efficient markets**
@@ -2011,54 +2092,77 @@ curl http://localhost:8080/metrics
 
 ### Monitoring
 
+**Comprehensive Grafana Dashboard Suite**
+
+The bot includes 7 production-ready Grafana dashboards covering all 65 metrics with 67+ panels:
+
+1. **Trading Performance** (10 panels) - Detection → Execution → Profit pipeline
+   - Opportunity detection rate, profit distribution, trade execution
+   - URL: `http://localhost:3000/d/trading-performance`
+
+2. **System Health** (15 panels) - Operational health monitoring
+   - WebSocket status, connection pool metrics, message processing latency
+   - URL: `http://localhost:3000/d/system-health`
+
+3. **Wallet Metrics** (8 panels) - Balance and P&L tracking
+   - USDC/MATIC balances, active positions, unrealized P&L with circuit breaker thresholds
+   - URL: `http://localhost:3000/d/wallet-metrics`
+
+4. **Orderbook Processing** (12 panels) - HFT latency performance
+   - E2E arbitrage detection latency (<1ms target), orderbook update processing
+   - URL: `http://localhost:3000/d/orderbook-processing`
+
+5. **Circuit Breaker** (11 panels) - Balance protection system
+   - State indicator, safety margin, balance vs thresholds, state change history
+   - URL: `http://localhost:3000/d/circuit-breaker`
+
+6. **Error Analysis** (11 panels) - Debugging and failure classification
+   - Execution errors by type, rejection reasons, skipped opportunities
+   - URL: `http://localhost:3000/d/error-analysis`
+
+7. **Cache & API Performance** (12 panels) - Cache efficiency and API latency
+   - Cache hit rate (>80% target), operation latency, metadata fetch duration
+   - URL: `http://localhost:3000/d/cache-api`
+
 **Prometheus scrape config:**
 ```yaml
 scrape_configs:
-  - job_name: 'polymarket-arb'
+  - job_name: 'arb-bot'
     static_configs:
       - targets: ['localhost:8080']
     metrics_path: '/metrics'
     scrape_interval: 15s
+    labels:
+      service: 'arb-bot'
+
+  - job_name: 'wallet-tracker'
+    static_configs:
+      - targets: ['localhost:8081']
+    metrics_path: '/metrics'
+    scrape_interval: 60s
+    labels:
+      service: 'wallet-tracker'
 ```
 
-**Grafana dashboard panels:**
-- Opportunities detected (rate)
-- Profit per opportunity (histogram)
-- Trades executed (counter)
-- Cumulative profit (gauge)
-- Orderbook update rate (rate)
-- Cache hit rate (gauge)
-- WebSocket connection status (gauge)
+**Key metrics to monitor:**
+- **E2E Latency (p99)**: <1ms for HFT performance (Dashboard 04)
+- **Cache Hit Rate**: >80% for optimal performance (Dashboard 07, 02)
+- **Circuit Breaker State**: Understand execution halts (Dashboard 05)
+- **Error Ratio**: <1% for healthy operation (Dashboard 06)
+- **WebSocket Pool**: All 5 connections active (Dashboard 02)
 
-**Alert rules:**
-```yaml
-groups:
-  - name: polymarket-arb
-    rules:
-      - alert: NoOpportunitiesDetected
-        expr: rate(arbitrage_opportunities_detected_total[5m]) == 0
-        for: 10m
-        labels:
-          severity: warning
-        annotations:
-          summary: "No arbitrage opportunities detected in 10 minutes"
+**Docker Compose Monitoring Stack:**
+```bash
+# Start Prometheus + Grafana + bot
+docker-compose up -d
 
-      - alert: WebSocketDisconnected
-        expr: websocket_connected == 0
-        for: 1m
-        labels:
-          severity: critical
-        annotations:
-          summary: "WebSocket connection lost"
-
-      - alert: HighCacheMissRate
-        expr: rate(cache_misses_total[5m]) / rate(cache_hits_total[5m]) > 0.5
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Cache miss rate above 50%"
+# Access dashboards
+open http://localhost:3000  # Grafana (admin/admin)
+open http://localhost:9090  # Prometheus
 ```
+
+**Comprehensive Guide:**
+See [docs/MONITORING.md](docs/MONITORING.md) for detailed dashboard usage, troubleshooting, and alerting setup.
 
 ## Contributing
 
