@@ -20,6 +20,7 @@ type Service struct {
 	maxMarketDuration time.Duration
 	logger            *zap.Logger
 	subscribed        map[string]*types.MarketSubscription
+	tokenToMarket     map[string]*types.MarketSubscription // Reverse index: tokenID -> market
 	mu                sync.RWMutex
 	newMarketsCh      chan *types.Market
 	singleMarket      string // For debugging: if set, only track this one market
@@ -46,7 +47,8 @@ func New(cfg *Config) *Service {
 		maxMarketDuration: cfg.MaxMarketDuration,
 		logger:            cfg.Logger,
 		subscribed:        make(map[string]*types.MarketSubscription),
-		newMarketsCh:      make(chan *types.Market, 5000),
+		tokenToMarket:     make(map[string]*types.MarketSubscription),
+		newMarketsCh:      make(chan *types.Market, 10000),
 		singleMarket:      cfg.SingleMarket,
 	}
 }
@@ -175,12 +177,17 @@ func (s *Service) pollSingleMarket(ctx context.Context) error {
 
 	// Mark as subscribed
 	s.mu.Lock()
-	s.subscribed[market.Slug] = &types.MarketSubscription{
+	marketSub := &types.MarketSubscription{
 		MarketID:     market.ID,
 		MarketSlug:   market.Slug,
 		Question:     market.Question,
 		Outcomes:     outcomes,
 		SubscribedAt: time.Now(),
+	}
+	s.subscribed[market.Slug] = marketSub
+	// Build reverse index: tokenID -> market
+	for _, outcome := range outcomes {
+		s.tokenToMarket[outcome.TokenID] = marketSub
 	}
 	s.mu.Unlock()
 
@@ -259,12 +266,17 @@ func (s *Service) identifyNewMarkets(markets []types.Market) []*types.Market {
 		}
 
 		// Mark as subscribed
-		s.subscribed[market.Slug] = &types.MarketSubscription{
+		marketSub := &types.MarketSubscription{
 			MarketID:     market.ID,
 			MarketSlug:   market.Slug,
 			Question:     market.Question,
 			Outcomes:     outcomes,
 			SubscribedAt: time.Now(),
+		}
+		s.subscribed[market.Slug] = marketSub
+		// Build reverse index: tokenID -> market
+		for _, outcome := range outcomes {
+			s.tokenToMarket[outcome.TokenID] = marketSub
 		}
 
 		newMarkets = append(newMarkets, market)
@@ -298,6 +310,15 @@ func (s *Service) GetMarketBySlug(slug string) (*types.MarketSubscription, bool)
 
 	sub, exists := s.subscribed[slug]
 	return sub, exists
+}
+
+// GetMarketByTokenID retrieves a market subscription by token ID (O(1) lookup).
+func (s *Service) GetMarketByTokenID(tokenID string) (*types.MarketSubscription, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	market, exists := s.tokenToMarket[tokenID]
+	return market, exists
 }
 
 // cacheMarket stores a market in the cache.

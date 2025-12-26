@@ -121,3 +121,14 @@ type LastTradePriceMessage struct {
 	FeeRateBps string `json:"fee_rate_bps"`
 	Timestamp  string `json:"timestamp"` // Unix timestamp as string
 }
+
+// TickSizeChangeMessage represents tick size change notifications from the CLOB API.
+// These messages indicate the minimum price increment for a market has changed.
+type TickSizeChangeMessage struct {
+	EventType   string `json:"event_type"` // "tick_size_change"
+	Market      string `json:"market"`
+	AssetID     string `json:"asset_id"`
+	OldTickSize string `json:"old_tick_size"`
+	NewTickSize string `json:"new_tick_size"`
+	Timestamp   string `json:"timestamp"` // Unix timestamp as string
+}

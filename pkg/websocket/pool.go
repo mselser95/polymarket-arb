@@ -14,16 +14,17 @@ import (
 
 // PoolConfig holds WebSocket pool configuration.
 type PoolConfig struct {
-	Size                  int           // Number of WebSocket connections (default: 5)
-	WSUrl                 string        // WebSocket URL
-	DialTimeout           time.Duration // Connection timeout
-	PongTimeout           time.Duration // Pong timeout
-	PingInterval          time.Duration // Ping interval
-	ReconnectInitialDelay time.Duration // Initial reconnect delay
-	ReconnectMaxDelay     time.Duration // Max reconnect delay
-	ReconnectBackoffMult  float64       // Reconnect backoff multiplier
-	MessageBufferSize     int           // Per-connection buffer size
+	Size                  int              // Number of WebSocket connections (default: 5)
+	WSUrl                 string           // WebSocket URL
+	DialTimeout           time.Duration    // Connection timeout
+	PongTimeout           time.Duration    // Pong timeout
+	PingInterval          time.Duration    // Ping interval
+	ReconnectInitialDelay time.Duration    // Initial reconnect delay
+	ReconnectMaxDelay     time.Duration    // Max reconnect delay
+	ReconnectBackoffMult  float64          // Reconnect backoff multiplier
+	MessageBufferSize     int              // Per-connection buffer size
 	Logger                *zap.Logger
+	MetadataUpdater       MetadataUpdater  // optional: for updating metadata cache on tick_size_change
 }
 
 // Pool manages multiple WebSocket connections for load distribution.
@@ -69,6 +70,7 @@ func NewPool(cfg PoolConfig) *Pool {
 			ReconnectBackoffMult:  cfg.ReconnectBackoffMult,
 			MessageBufferSize:     cfg.MessageBufferSize,
 			Logger:                cfg.Logger.With(zap.Int("manager-id", i)),
+			MetadataUpdater:       cfg.MetadataUpdater,
 		}
 
 		pool.managers[i] = New(managerCfg)

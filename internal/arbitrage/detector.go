@@ -51,7 +51,7 @@ func New(cfg Config, obManager *orderbook.Manager, discoveryService *discovery.S
 		logger:           cfg.Logger,
 		storage:          storage,
 		metadataClient:   metadataClient,
-		opportunityChan:  make(chan *Opportunity, 500),
+		opportunityChan:  make(chan *Opportunity, 10000),
 		obUpdateChan:     obManager.UpdateChan(),
 	}
 }
@@ -94,25 +94,9 @@ func (d *Detector) detectionLoop() {
 
 // checkArbitrageForToken checks for arbitrage when a specific token's orderbook updates.
 func (d *Detector) checkArbitrageForToken(update *types.OrderbookSnapshot) {
-	// Find which market this token belongs to
-	markets := d.discoveryService.GetSubscribedMarkets()
-
-	var targetMarket *types.MarketSubscription
-
-	for _, market := range markets {
-		// Check all outcomes in this market
-		for _, outcome := range market.Outcomes {
-			if outcome.TokenID == update.TokenID {
-				targetMarket = market
-				break
-			}
-		}
-		if targetMarket != nil {
-			break
-		}
-	}
-
-	if targetMarket == nil {
+	// Find which market this token belongs to (O(1) lookup via reverse index)
+	targetMarket, exists := d.discoveryService.GetMarketByTokenID(update.TokenID)
+	if !exists {
 		// Token not part of any subscribed market
 		return
 	}

@@ -84,7 +84,7 @@ func LoadFromEnv() (*Config, error) {
 
 		// Market Discovery defaults
 		DiscoveryPollInterval: getDurationOrDefault("DISCOVERY_POLL_INTERVAL", 30*time.Second),
-		DiscoveryMarketLimit:  getIntOrDefault("DISCOVERY_MARKET_LIMIT", 1000),
+		DiscoveryMarketLimit:  getIntOrDefault("DISCOVERY_MARKET_LIMIT", 600),
 		MaxMarketDuration:     getDurationOrDefault("ARB_MAX_MARKET_DURATION", 0), // 0 = unlimited
 
 		// Market Cleanup defaults
@@ -98,7 +98,7 @@ func LoadFromEnv() (*Config, error) {
 		WSReconnectInitialDelay: getDurationOrDefault("WS_RECONNECT_INITIAL_DELAY", 1*time.Second),
 		WSReconnectMaxDelay:     getDurationOrDefault("WS_RECONNECT_MAX_DELAY", 30*time.Second),
 		WSReconnectBackoffMult:  getFloat64OrDefault("WS_RECONNECT_BACKOFF_MULTIPLIER", 2.0),
-		WSMessageBufferSize:     getIntOrDefault("WS_MESSAGE_BUFFER_SIZE", 10000),
+		WSMessageBufferSize:     getIntOrDefault("WS_MESSAGE_BUFFER_SIZE", 100000),
 
 		// Arbitrage defaults
 		ArbThreshold:         getFloat64OrDefault("ARB_THRESHOLD", 0.995),

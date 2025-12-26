@@ -42,8 +42,12 @@ func New(cfg *config.Config, logger *zap.Logger, opts *Options) (*App, error) {
 		return nil, fmt.Errorf("setup cache: %w", err)
 	}
 
+	// Setup metadata client (needed for WebSocket pool to update tick sizes)
+	metadataClient := markets.NewMetadataClient()
+	cachedMetadataClient := markets.NewCachedMetadataClient(metadataClient, marketCache)
+
 	discoveryService := setupDiscoveryService(cfg, logger, marketCache, opts)
-	wsPool := setupWebSocketPool(cfg, logger)
+	wsPool := setupWebSocketPool(cfg, logger, cachedMetadataClient)
 	obManager := setupOrderbookManager(logger, wsPool)
 
 	// Setup HTTP server (needs orderbook manager and discovery service)
@@ -57,7 +61,7 @@ func New(cfg *config.Config, logger *zap.Logger, opts *Options) (*App, error) {
 	}
 
 	// Setup arbitrage detector
-	arbDetector := setupArbitrageDetector(cfg, logger, obManager, discoveryService, arbStorage, marketCache)
+	arbDetector := setupArbitrageDetector(cfg, logger, obManager, discoveryService, arbStorage, cachedMetadataClient)
 
 	// Setup executor
 	executor, err := setupExecutor(ctx, cfg, logger, arbDetector)
@@ -124,7 +128,7 @@ func setupDiscoveryService(cfg *config.Config, logger *zap.Logger, marketCache c
 	})
 }
 
-func setupWebSocketPool(cfg *config.Config, logger *zap.Logger) *websocket.Pool {
+func setupWebSocketPool(cfg *config.Config, logger *zap.Logger, metadataUpdater websocket.MetadataUpdater) *websocket.Pool {
 	return websocket.NewPool(websocket.PoolConfig{
 		Size:                  cfg.WSPoolSize,
 		WSUrl:                 cfg.PolymarketWSURL,
@@ -136,6 +140,7 @@ func setupWebSocketPool(cfg *config.Config, logger *zap.Logger) *websocket.Pool 
 		ReconnectBackoffMult:  cfg.WSReconnectBackoffMult,
 		MessageBufferSize:     cfg.WSMessageBufferSize,
 		Logger:                logger,
+		MetadataUpdater:       metadataUpdater,
 	})
 }
 
@@ -172,12 +177,8 @@ func setupArbitrageDetector(
 	obManager *orderbook.Manager,
 	discoveryService *discovery.Service,
 	arbStorage arbitrage.Storage,
-	appCache cache.Cache,
+	cachedMetadataClient *markets.CachedMetadataClient,
 ) *arbitrage.Detector {
-	// Create metadata client for fetching tick size and min order size
-	metadataClient := markets.NewMetadataClient()
-	cachedMetadataClient := markets.NewCachedMetadataClient(metadataClient, appCache)
-
 	return arbitrage.New(
 		arbitrage.Config{
 			Threshold:    cfg.ArbThreshold,

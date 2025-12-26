@@ -65,3 +65,28 @@ func (c *CachedMetadataClient) GetTokenMetadata(ctx context.Context, tokenID str
 
 	return tickSize, minOrderSize, nil
 }
+
+// UpdateTickSize updates the tick size for a token in the cache without refetching from API.
+// This is called when a tick_size_change WebSocket event is received.
+// If the token is not in cache, this is a no-op (will be fetched on next access).
+func (c *CachedMetadataClient) UpdateTickSize(tokenID string, newTickSize float64) {
+	if c.cache == nil {
+		return
+	}
+
+	cacheKey := fmt.Sprintf("metadata:%s", tokenID)
+
+	// Get existing cached metadata
+	if cached, ok := c.cache.Get(cacheKey); ok {
+		if meta, ok := cached.(*TokenMetadata); ok {
+			// Update tick size while preserving other fields
+			updatedMeta := &TokenMetadata{
+				TickSize:     newTickSize,
+				MinOrderSize: meta.MinOrderSize,
+				FetchedAt:    time.Now(), // Update fetch time to indicate freshness
+			}
+			c.cache.Set(cacheKey, updatedMeta, c.ttl)
+		}
+	}
+	// If not in cache, no-op - will be fetched with correct value on next access
+}

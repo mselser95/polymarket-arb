@@ -13,6 +13,11 @@ import (
 	"go.uber.org/zap"
 )
 
+// MetadataUpdater is an interface for updating market metadata cache
+type MetadataUpdater interface {
+	UpdateTickSize(tokenID string, newTickSize float64)
+}
+
 // Manager manages a single WebSocket connection to Polymarket.
 type Manager struct {
 	url             string
@@ -21,6 +26,7 @@ type Manager struct {
 	reconnectMgr    *ReconnectManager
 	config          Config
 	messageChan     chan *types.OrderbookMessage
+	metadataUpdater MetadataUpdater // optional: for updating metadata cache
 	ctx             context.Context
 	cancel          context.CancelFunc
 	wg              sync.WaitGroup
@@ -42,6 +48,7 @@ type Config struct {
 	ReconnectBackoffMult  float64
 	MessageBufferSize     int
 	Logger                *zap.Logger
+	MetadataUpdater       MetadataUpdater // optional: for updating metadata cache on tick_size_change
 }
 
 // New creates a new WebSocket manager.
@@ -56,14 +63,15 @@ func New(cfg Config) *Manager {
 	}
 
 	return &Manager{
-		url:          cfg.URL,
-		logger:       cfg.Logger,
-		reconnectMgr: NewReconnectManager(reconnectCfg, cfg.Logger),
-		config:       cfg,
-		messageChan:  make(chan *types.OrderbookMessage, cfg.MessageBufferSize),
-		ctx:          ctx,
-		cancel:       cancel,
-		subscribed:   make(map[string]bool),
+		url:             cfg.URL,
+		logger:          cfg.Logger,
+		reconnectMgr:    NewReconnectManager(reconnectCfg, cfg.Logger),
+		config:          cfg,
+		messageChan:     make(chan *types.OrderbookMessage, cfg.MessageBufferSize),
+		metadataUpdater: cfg.MetadataUpdater,
+		ctx:             ctx,
+		cancel:          cancel,
+		subscribed:      make(map[string]bool),
 	}
 }
 
@@ -90,6 +98,10 @@ func (m *Manager) Start() error {
 func (m *Manager) connect(ctx context.Context) error {
 	dialer := websocket.Dialer{
 		HandshakeTimeout: m.config.DialTimeout,
+		// Increase buffer sizes from default 4KB to 1MB to handle large orderbook messages
+		// With 20 connections and high-volume markets, messages can be > 2KB
+		ReadBufferSize:  1024 * 1024, // 1MB read buffer
+		WriteBufferSize: 1024 * 1024, // 1MB write buffer
 	}
 
 	m.logger.Info("connecting-to-websocket", zap.String("url", m.url))
@@ -287,6 +299,11 @@ func (m *Manager) readLoop() {
 		}
 
 		// Parse message - Try different formats based on Polymarket CLOB API
+		// The API sends messages in multiple formats:
+		// - Array of book snapshots: [{...}, {...}] (initial subscription)
+		// - Single book snapshot: {...} (individual updates)
+		// - price_change messages (incremental updates)
+		// - last_trade_price messages (trade notifications)
 
 		// Try #1: Array of book messages (initial snapshots)
 		var obMsgs []types.OrderbookMessage
@@ -303,13 +320,41 @@ func (m *Manager) readLoop() {
 				select {
 				case m.messageChan <- obMsg:
 				default:
-					m.logger.Warn("message-channel-full", zap.String("event-type", obMsg.EventType))
+					m.logger.Error("CRITICAL-message-channel-full-DROPPING-DATA",
+						zap.String("event-type", obMsg.EventType),
+						zap.Int("buffer-size", cap(m.messageChan)),
+						zap.String("action", "increase WS_MESSAGE_BUFFER_SIZE"))
 					MessagesDroppedTotal.WithLabelValues("channel_full").Inc()
 				}
 
 				// Observe message processing latency
 				MessageLatencySeconds.Observe(time.Since(start).Seconds())
 			}
+			continue
+		}
+
+		// Try #1b: Single book message (not in array)
+		var singleObMsg types.OrderbookMessage
+		singleBookErr := json.Unmarshal(message, &singleObMsg)
+		if singleBookErr == nil && singleObMsg.EventType == "book" {
+			// Successfully parsed as single book message
+			start := time.Now()
+
+			MessagesReceivedTotal.WithLabelValues(singleObMsg.EventType).Inc()
+
+			// Send to channel (non-blocking)
+			select {
+			case m.messageChan <- &singleObMsg:
+			default:
+				m.logger.Error("CRITICAL-message-channel-full-DROPPING-DATA",
+					zap.String("event-type", singleObMsg.EventType),
+					zap.Int("buffer-size", cap(m.messageChan)),
+					zap.String("action", "increase WS_MESSAGE_BUFFER_SIZE"))
+				MessagesDroppedTotal.WithLabelValues("channel_full").Inc()
+			}
+
+			// Observe message processing latency
+			MessageLatencySeconds.Observe(time.Since(start).Seconds())
 			continue
 		}
 
@@ -347,7 +392,10 @@ func (m *Manager) readLoop() {
 				select {
 				case m.messageChan <- obMsg:
 				default:
-					m.logger.Warn("message-channel-full", zap.String("event-type", "price_change"))
+					m.logger.Error("CRITICAL-message-channel-full-DROPPING-DATA",
+						zap.String("event-type", "price_change"),
+						zap.Int("buffer-size", cap(m.messageChan)),
+						zap.String("action", "increase WS_MESSAGE_BUFFER_SIZE"))
 					MessagesDroppedTotal.WithLabelValues("channel_full").Inc()
 				}
 
@@ -374,7 +422,44 @@ func (m *Manager) readLoop() {
 			continue
 		}
 
-		// Try #4: Identify other message types for better logging
+		// Try #4: TickSizeChangeMessage (tick size updates)
+		var tickSizeMsg types.TickSizeChangeMessage
+		tickSizeErr := json.Unmarshal(message, &tickSizeMsg)
+		if tickSizeErr == nil && tickSizeMsg.EventType == "tick_size_change" {
+			// Successfully parsed as tick_size_change message
+			MessagesReceivedTotal.WithLabelValues("tick_size_change").Inc()
+
+			// Update metadata cache if updater is available
+			if m.metadataUpdater != nil {
+				// Parse new tick size
+				var newTickSize float64
+				_, scanErr := fmt.Sscanf(tickSizeMsg.NewTickSize, "%f", &newTickSize)
+				if scanErr == nil {
+					m.metadataUpdater.UpdateTickSize(tickSizeMsg.AssetID, newTickSize)
+					m.logger.Info("tick-size-change-received-and-updated",
+						zap.String("market", tickSizeMsg.Market),
+						zap.String("asset-id", tickSizeMsg.AssetID),
+						zap.String("old-tick-size", tickSizeMsg.OldTickSize),
+						zap.String("new-tick-size", tickSizeMsg.NewTickSize),
+						zap.String("action", "metadata cache updated"))
+				} else {
+					m.logger.Warn("tick-size-change-parse-error",
+						zap.String("asset-id", tickSizeMsg.AssetID),
+						zap.String("new-tick-size", tickSizeMsg.NewTickSize),
+						zap.Error(scanErr))
+				}
+			} else {
+				m.logger.Info("tick-size-change-received",
+					zap.String("market", tickSizeMsg.Market),
+					zap.String("asset-id", tickSizeMsg.AssetID),
+					zap.String("old-tick-size", tickSizeMsg.OldTickSize),
+					zap.String("new-tick-size", tickSizeMsg.NewTickSize),
+					zap.String("action", "no metadata updater configured"))
+			}
+			continue
+		}
+
+		// Try #5: Identify other message types for better logging
 		messageStr := string(message)
 
 		// Check if it's a heartbeat/keepalive (empty array or minimal content)
@@ -395,17 +480,15 @@ func (m *Manager) readLoop() {
 			}
 		}
 
-		// Unknown message format - log with preview for debugging
-		previewLen := len(messageStr)
-		if previewLen > 500 {
-			previewLen = 500
-		}
+		// Unknown message format - log FULL message for debugging
 		m.logger.Warn("websocket-unparseable-message",
-			zap.NamedError("book-parse-error", bookErr),
+			zap.NamedError("book-array-parse-error", bookErr),
+			zap.NamedError("book-single-parse-error", singleBookErr),
 			zap.NamedError("price-change-parse-error", priceErr),
 			zap.NamedError("trade-parse-error", tradeErr),
+			zap.NamedError("tick-size-change-parse-error", tickSizeErr),
 			zap.Int("bytes", len(message)),
-			zap.String("message-preview", messageStr[:previewLen]))
+			zap.String("full-message", messageStr))
 	}
 }
 

@@ -35,7 +35,7 @@ func New(cfg *Config) *Manager {
 		books:      make(map[string]*types.OrderbookSnapshot),
 		logger:     cfg.Logger,
 		msgChan:    cfg.MessageChannel,
-		updateChan: make(chan *types.OrderbookSnapshot, 10000), // Buffer for high update rate
+		updateChan: make(chan *types.OrderbookSnapshot, 100000), // Buffer for high update rate
 	}
 }
 
@@ -143,6 +143,10 @@ func (m *Manager) handleBookMessage(msg *types.OrderbookMessage) error {
 	case m.updateChan <- snapshot:
 	default:
 		// Channel full, drop update
+		m.logger.Error("CRITICAL-orderbook-update-channel-full-DROPPING-DATA",
+			zap.String("token-id", msg.AssetID),
+			zap.Int("buffer-size", cap(m.updateChan)),
+			zap.String("action", "processing too slow or increase buffer"))
 		UpdatesDroppedTotal.WithLabelValues("channel_full").Inc()
 	}
 
@@ -220,6 +224,10 @@ func (m *Manager) handlePriceChangeMessage(msg *types.OrderbookMessage) error {
 	case m.updateChan <- &snapshotCopy:
 	default:
 		// Channel full, drop update
+		m.logger.Error("CRITICAL-orderbook-update-channel-full-DROPPING-DATA",
+			zap.String("token-id", msg.AssetID),
+			zap.Int("buffer-size", cap(m.updateChan)),
+			zap.String("action", "processing too slow or increase buffer"))
 		UpdatesDroppedTotal.WithLabelValues("channel_full").Inc()
 	}
 

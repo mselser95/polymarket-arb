@@ -157,6 +157,12 @@ go test -bench=. -benchmem ./...
 - Cache testing: Call `cache.Wait()` after `Set()` (Ristretto uses async admission)
 - Race detector: Run with `-race` regularly to catch concurrency bugs
 
+**Test Coverage:**
+- Infrastructure packages (pkg/): Full test coverage including wallet, httpserver, healthprobe
+- Core business logic (internal/): Comprehensive unit and integration tests
+- E2E flows: Multi-outcome arbitrage, order placement, market discovery
+- See TESTING.md for complete test file listing and coverage goals
+
 ### Credentials & Authentication
 
 ```bash
@@ -411,11 +417,14 @@ All config loaded via environment variables with defaults. See `LoadFromEnv()` f
 
 **WebSocket & Performance:**
 - `WS_POOL_SIZE=20`: Number of WebSocket connections (default: 20, max: 20)
-- `WS_MESSAGE_BUFFER_SIZE=10000`: Per-connection message buffer (default: 10,000)
-- Orderbook update channel: 10,000 message buffer
-- Arbitrage opportunity channel: 500 message buffer
-- Discovery new markets channel: 5,000 message buffer
-- **Docker CPU limit**: 2.0 CPUs (configurable in docker-compose.yml)
+- `WS_MESSAGE_BUFFER_SIZE=100000`: Per-connection message buffer (default: 100,000) - **CRITICAL for high throughput**
+- WebSocket read/write buffers: 1MB each (handles large orderbook messages up to 10MB)
+- Orderbook update channel: 100,000 message buffer (tuned for 7K+ ops/sec)
+- Arbitrage opportunity channel: 10,000 message buffer
+- Discovery new markets channel: 10,000 message buffer
+- **Docker CPU limit**: 5.0 CPUs (configurable in docker-compose.yml)
+- **Docker Memory limit**: 2048M with 1024M reservation
+- **Dropped message logging**: ERROR level (visible in logs when buffers full)
 
 **Circuit Breaker (Balance Protection):**
 
@@ -484,7 +493,7 @@ The bot uses a three-layer filtering system:
 
 **Example with defaults:**
 - Gamma API: 1,800 total active markets
-- Fetched: 1000 markets (DISCOVERY_MARKET_LIMIT)
+- Fetched: 600 markets (DISCOVERY_MARKET_LIMIT)
 - Duration filter: 50 markets expire within 1 hour (ARB_MAX_MARKET_DURATION)
 - Subscriptions: 100 WebSocket subs (50 markets × 2 tokens)
 
@@ -835,9 +844,9 @@ case <-time.After(1 * time.Second):
 - **Impact:** None - detector only processes markets with valid orderbooks
 
 **Market Discovery**
-- **Default limit:** 1000 markets fetched from API (configurable via `DISCOVERY_MARKET_LIMIT`)
+- **Default limit:** 600 markets fetched from API (configurable via `DISCOVERY_MARKET_LIMIT`)
 - **Duration filter:** Only markets expiring within `ARB_MAX_MARKET_DURATION` (default: 1h) are subscribed
-- **Example:** 1000 markets fetched → 50 expiring within 1h → 100 WebSocket subscriptions (50×2 tokens)
+- **Example:** 600 markets fetched → 50 expiring within 1h → 100 WebSocket subscriptions (50×2 tokens)
 - **Trade-off:** More subscriptions = more opportunities but higher resource usage
 
 **Detector Not Finding Opportunities**

@@ -1160,8 +1160,13 @@ Current coverage by package:
 
 | Package | Coverage | Key Tests |
 |---------|----------|-----------|
+| **Infrastructure (pkg/)** |||
+| `pkg/wallet` | Full | Balance/position tracking, metrics |
+| `pkg/httpserver` | Full | Health, metrics, orderbook endpoints |
+| `pkg/healthprobe` | Full | Liveness, readiness, state management |
+| `pkg/cache` | 84.0% | Ristretto operations |
+| **Core Logic (internal/)** |||
 | `internal/markets` | 85.0% | Metadata fetching, caching |
-| `internal/cache` | 84.0% | Ristretto operations |
 | `internal/storage` | 77.3% | Postgres, console output |
 | `internal/discovery` | 75.7% | Market polling |
 | `internal/orderbook` | 51.0% | Snapshot updates |

@@ -67,8 +67,8 @@ func TestNew(t *testing.T) {
 		t.Error("expected non-nil new markets channel")
 	}
 
-	if cap(svc.newMarketsCh) != 2000 {
-		t.Errorf("expected channel capacity 2000, got %d", cap(svc.newMarketsCh))
+	if cap(svc.newMarketsCh) != 10000 {
+		t.Errorf("expected channel capacity 10000, got %d", cap(svc.newMarketsCh))
 	}
 }
 
@@ -76,8 +76,9 @@ func TestService_IdentifyNewMarkets(t *testing.T) {
 	logger, _ := zap.NewDevelopment()
 
 	svc := &Service{
-		logger:     logger,
-		subscribed: make(map[string]*types.MarketSubscription),
+		logger:        logger,
+		subscribed:    make(map[string]*types.MarketSubscription),
+		tokenToMarket: make(map[string]*types.MarketSubscription),
 	}
 
 	markets := []types.Market{
@@ -140,8 +141,9 @@ func TestService_IdentifyNewMarkets_Duplicates(t *testing.T) {
 	logger, _ := zap.NewDevelopment()
 
 	svc := &Service{
-		logger:     logger,
-		subscribed: make(map[string]*types.MarketSubscription),
+		logger:        logger,
+		subscribed:    make(map[string]*types.MarketSubscription),
+		tokenToMarket: make(map[string]*types.MarketSubscription),
 	}
 
 	// Pre-subscribe to market-1
@@ -187,8 +189,9 @@ func TestService_GetSubscribedMarkets(t *testing.T) {
 	logger, _ := zap.NewDevelopment()
 
 	svc := &Service{
-		logger:     logger,
-		subscribed: make(map[string]*types.MarketSubscription),
+		logger:        logger,
+		subscribed:    make(map[string]*types.MarketSubscription),
+		tokenToMarket: make(map[string]*types.MarketSubscription),
 	}
 
 	// Add subscriptions
@@ -678,6 +681,7 @@ func TestService_identifyNewMarkets_UnlimitedDuration(t *testing.T) {
 	svc := &Service{
 		logger:            logger,
 		subscribed:        make(map[string]*types.MarketSubscription),
+		tokenToMarket:     make(map[string]*types.MarketSubscription),
 		maxMarketDuration: 0, // Unlimited - no duration filtering
 	}
 
@@ -750,6 +754,7 @@ func TestService_identifyNewMarkets_WithDurationFilter(t *testing.T) {
 	svc := &Service{
 		logger:            logger,
 		subscribed:        make(map[string]*types.MarketSubscription),
+		tokenToMarket:     make(map[string]*types.MarketSubscription),
 		maxMarketDuration: 24 * time.Hour, // Filter markets expiring > 24 hours
 	}
 

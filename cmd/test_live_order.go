@@ -1,16 +1,10 @@
 package cmd
 
 import (
-	"bytes"
 	"context"
 	"crypto/ecdsa"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -18,7 +12,9 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/joho/godotenv"
 	"github.com/mselser95/polymarket-arb/internal/discovery"
+	"github.com/mselser95/polymarket-arb/internal/execution"
 	"github.com/mselser95/polymarket-arb/pkg/types"
+	"github.com/polymarket/go-order-utils/pkg/model"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 )
@@ -55,14 +51,12 @@ func init() {
 	testLiveOrderCmd.Flags().String("mock-response", "test_responses/order_success.json", "Path to mock response JSON file")
 }
 
-// OrderRequest represents a CLOB API order request
-type OrderRequest struct {
-	TokenID    string `json:"token_id"`
-	Price      string `json:"price"` // String to match API format
-	Size       string `json:"size"`  // String to match API format
-	Side       string `json:"side"`  // "BUY" or "SELL"
-	OrderType  string `json:"type"`  // "GTC", "FOK", "IOC"
-	Expiration int64  `json:"expiration,omitempty"`
+// OrderParams represents order parameters for the OrderClient
+type OrderParams struct {
+	TokenID string
+	Price   float64
+	Size    float64
+	Side    model.Side
 }
 
 // ErrorResponse represents an API error response
@@ -162,30 +156,13 @@ func runTestLiveOrder(cmd *cobra.Command, args []string) error {
 	fmt.Printf("YES Token: %s\n", yesToken.TokenID)
 	fmt.Printf("NO Token: %s\n\n", noToken.TokenID)
 
-	// Build both orders
-	yesOrderReq := OrderRequest{
-		TokenID:   yesToken.TokenID,
-		Price:     fmt.Sprintf("%.4f", yesPrice),
-		Size:      fmt.Sprintf("%.2f", size),
-		Side:      "BUY",
-		OrderType: "GTC", // Good Till Cancelled
-	}
-
-	noOrderReq := OrderRequest{
-		TokenID:   noToken.TokenID,
-		Price:     fmt.Sprintf("%.4f", noPrice),
-		Size:      fmt.Sprintf("%.2f", size),
-		Side:      "BUY",
-		OrderType: "GTC",
-	}
-
 	// Submit orders
 	var yesResp, noResp *types.OrderSubmissionResponse
 
 	if paperMode {
 		fmt.Printf("=== Simulating Batch Orders (YES + NO) ===\n")
-		yesResp = simulatePaperOrder(yesOrderReq, market.ID, "YES")
-		noResp = simulatePaperOrder(noOrderReq, market.ID, "NO")
+		yesResp = simulatePaperOrder(yesToken.TokenID, yesPrice, size, "YES")
+		noResp = simulatePaperOrder(noToken.TokenID, noPrice, size, "NO")
 		displayOrderResponse("YES", yesResp, true)
 		displayOrderResponse("NO", noResp, true)
 	} else if mockMode {
@@ -203,10 +180,53 @@ func runTestLiveOrder(cmd *cobra.Command, args []string) error {
 			displayOrderResponse("NO", noResp, false)
 		}
 	} else {
-		fmt.Printf("=== Submitting Batch Orders (YES + NO) ===\n")
-		fmt.Printf("Using atomic batch submission to /orders endpoint\n\n")
+		// LIVE MODE: Use production OrderClient
+		fmt.Printf("=== Submitting Batch Orders via OrderClient ===\n")
+		fmt.Printf("Using atomic batch submission with EIP-712 signatures\n\n")
 
-		responses, err := submitBatchLiveOrders(ctx, []OrderRequest{yesOrderReq, noOrderReq}, market.ID)
+		// Create OrderClient
+		orderClient, err := createOrderClient(logger)
+		if err != nil {
+			return fmt.Errorf("create order client: %w", err)
+		}
+
+		// Build order parameters (need tick size and min size from market)
+		yesTickSize := 0.01 // Default tick size
+		noTickSize := 0.01
+		yesMinSize := 5.0 // Default min size
+		noMinSize := 5.0
+
+		// Try to get tick size and min size from market if available
+		if yesToken.TickSize > 0 {
+			yesTickSize = yesToken.TickSize
+		}
+		if noToken.TickSize > 0 {
+			noTickSize = noToken.TickSize
+		}
+		if yesToken.MinOrderSize > 0 {
+			yesMinSize = yesToken.MinOrderSize
+		}
+		if noToken.MinOrderSize > 0 {
+			noMinSize = noToken.MinOrderSize
+		}
+
+		orderParams := []execution.OutcomeOrderParams{
+			{
+				TokenID:  yesToken.TokenID,
+				Price:    yesPrice,
+				TickSize: yesTickSize,
+				MinSize:  yesMinSize,
+			},
+			{
+				TokenID:  noToken.TokenID,
+				Price:    noPrice,
+				TickSize: noTickSize,
+				MinSize:  noMinSize,
+			},
+		}
+
+		// Submit batch order via OrderClient
+		responses, err := orderClient.PlaceOrdersMultiOutcome(ctx, orderParams, size)
 		if err != nil {
 			fmt.Printf("Batch order submission failed: %v\n\n", err)
 			saveResponseToFile("test_responses/last_error_batch.json", err.Error())
@@ -261,20 +281,14 @@ func runTestLiveOrder(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func simulatePaperOrder(
-	orderReq OrderRequest,
-	marketID string,
-	outcome string,
-) (resp *types.OrderSubmissionResponse) {
+func simulatePaperOrder(tokenID string, price float64, size float64, outcome string) (resp *types.OrderSubmissionResponse) {
 	// Simulate a successful order response using actual API response format
 	timestamp := time.Now()
 	orderID := fmt.Sprintf("paper_%d", timestamp.UnixNano())
 
 	// Calculate amounts (simulate based on price and size)
-	sizeFloat := mustParseFloat(orderReq.Size)
-	priceFloat := mustParseFloat(orderReq.Price)
-	takingAmount := fmt.Sprintf("%.0f", sizeFloat*1000000)    // USDC raw amount
-	makingAmount := fmt.Sprintf("%.0f", priceFloat*1000000)   // Token raw amount
+	takingAmount := fmt.Sprintf("%.0f", size*1000000)    // USDC raw amount
+	makingAmount := fmt.Sprintf("%.0f", price*1000000)   // Token raw amount
 
 	resp = &types.OrderSubmissionResponse{
 		Success:      true,
@@ -289,124 +303,7 @@ func simulatePaperOrder(
 	return resp
 }
 
-func submitLiveOrder(
-	ctx context.Context,
-	orderReq OrderRequest,
-	marketID string,
-) (resp *types.OrderSubmissionResponse, err error) {
-	// Load config from environment
-	cfg, err := loadConfig()
-	if err != nil {
-		err = fmt.Errorf("load config: %w", err)
-		return resp, err
-	}
-
-	// Polymarket CLOB API endpoint
-	clobURL := "https://clob.polymarket.com/order"
-
-	// Marshal order request
-	orderJSON, err := json.Marshal(orderReq)
-	if err != nil {
-		err = fmt.Errorf("marshal order: %w", err)
-		return resp, err
-	}
-
-	// Create timestamp (Unix SECONDS, not milliseconds!)
-	timestamp := fmt.Sprintf("%d", time.Now().Unix())
-
-	// Decode base64 secret (try base64url first, then standard base64)
-	secretBytes, err := base64.URLEncoding.DecodeString(cfg.Secret)
-	if err != nil {
-		// Try standard base64 encoding
-		secretBytes, err = base64.StdEncoding.DecodeString(cfg.Secret)
-		if err != nil {
-			err = fmt.Errorf("decode secret: %w", err)
-			return resp, err
-		}
-	}
-
-	// Create HMAC signature
-	// Format: timestamp + method + requestPath + body
-	signaturePayload := timestamp + "POST" + "/order" + string(orderJSON)
-	signature := createHMACSignature(signaturePayload, secretBytes)
-
-	// Create HTTP request
-	req, err := http.NewRequestWithContext(ctx, "POST", clobURL, bytes.NewBuffer(orderJSON))
-	if err != nil {
-		err = fmt.Errorf("create request: %w", err)
-		return resp, err
-	}
-
-	// Add L2 authentication headers
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("POLY_API_KEY", cfg.APIKey)
-	req.Header.Set("POLY_SIGNATURE", signature)
-	req.Header.Set("POLY_TIMESTAMP", timestamp)
-	req.Header.Set("POLY_PASSPHRASE", cfg.Passphrase)
-
-	// Address is required
-	if cfg.Address != "" {
-		req.Header.Set("POLY_ADDRESS", cfg.Address)
-	}
-
-	// Send request
-	httpClient := &http.Client{Timeout: 10 * time.Second}
-	httpResp, err := httpClient.Do(req)
-	if err != nil {
-		err = fmt.Errorf("send request: %w", err)
-		return resp, err
-	}
-	defer httpResp.Body.Close()
-
-	// Read response body
-	body, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		err = fmt.Errorf("read response: %w", err)
-		return resp, err
-	}
-
-	// Log full request details for debugging
-	fmt.Printf("\nDebug - Request Details:\n")
-	fmt.Printf("  URL: %s\n", clobURL)
-	fmt.Printf("  Method: POST\n")
-	fmt.Printf("  API Key: %s\n", cfg.APIKey)
-	fmt.Printf("  Address: %s\n", cfg.Address)
-	fmt.Printf("  Timestamp: %s\n", timestamp)
-	fmt.Printf("  Signature: %s\n", signature)
-	fmt.Printf("  Request Body: %s\n", string(orderJSON))
-
-	// Check status code
-	fmt.Printf("\nDebug - Response:\n")
-	fmt.Printf("  Status Code: %d\n", httpResp.StatusCode)
-	fmt.Printf("  Response Body: %s\n\n", string(body))
-
-	if httpResp.StatusCode != http.StatusOK && httpResp.StatusCode != http.StatusCreated {
-		// Try to parse error response
-		var errResp ErrorResponse
-		if json.Unmarshal(body, &errResp) == nil {
-			err = fmt.Errorf("API error (status %d): %s - %s", httpResp.StatusCode, errResp.Error, errResp.Message)
-			return resp, err
-		}
-		err = fmt.Errorf("API error (status %d): %s", httpResp.StatusCode, string(body))
-		return resp, err
-	}
-
-	// Parse success response
-	err = json.Unmarshal(body, &resp)
-	if err != nil {
-		err = fmt.Errorf("parse response: %w\nBody: %s", err, string(body))
-		return resp, err
-	}
-
-	return resp, nil
-}
-
-// submitBatchLiveOrders submits multiple orders atomically via the /orders batch endpoint
-func submitBatchLiveOrders(
-	ctx context.Context,
-	orders []OrderRequest,
-	marketID string,
-) (responses []*types.OrderSubmissionResponse, err error) {
+func createOrderClient(logger *zap.Logger) (client *execution.OrderClient, err error) {
 	// Load config from environment
 	cfg, err := loadConfig()
 	if err != nil {
@@ -414,105 +311,21 @@ func submitBatchLiveOrders(
 		return nil, err
 	}
 
-	// Polymarket CLOB API batch endpoint (plural)
-	clobURL := "https://clob.polymarket.com/orders"
-
-	// Marshal batch order request (array of orders)
-	orderJSON, err := json.Marshal(orders)
-	if err != nil {
-		err = fmt.Errorf("marshal batch orders: %w", err)
-		return nil, err
+	// Create OrderClient config
+	orderClientCfg := &execution.OrderClientConfig{
+		APIKey:        cfg.APIKey,
+		Secret:        cfg.Secret,
+		Passphrase:    cfg.Passphrase,
+		PrivateKey:    cfg.PrivateKey,
+		ProxyAddress:  cfg.Address, // Use configured address (proxy or EOA)
+		SignatureType: 0,            // EOA by default
+		Logger:        logger,
 	}
 
-	// Create timestamp (Unix SECONDS, not milliseconds!)
-	timestamp := fmt.Sprintf("%d", time.Now().Unix())
-
-	// Decode base64 secret (try base64url first, then standard base64)
-	secretBytes, err := base64.URLEncoding.DecodeString(cfg.Secret)
-	if err != nil {
-		// Try standard base64 encoding
-		secretBytes, err = base64.StdEncoding.DecodeString(cfg.Secret)
-		if err != nil {
-			err = fmt.Errorf("decode secret: %w", err)
-			return nil, err
-		}
-	}
-
-	// Create HMAC signature for batch endpoint
-	// Format: timestamp + method + requestPath + body
-	signaturePayload := timestamp + "POST" + "/orders" + string(orderJSON)
-	signature := createHMACSignature(signaturePayload, secretBytes)
-
-	// Create HTTP request
-	req, err := http.NewRequestWithContext(ctx, "POST", clobURL, bytes.NewBuffer(orderJSON))
-	if err != nil {
-		err = fmt.Errorf("create request: %w", err)
-		return nil, err
-	}
-
-	// Add L2 authentication headers
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("POLY_API_KEY", cfg.APIKey)
-	req.Header.Set("POLY_SIGNATURE", signature)
-	req.Header.Set("POLY_TIMESTAMP", timestamp)
-	req.Header.Set("POLY_PASSPHRASE", cfg.Passphrase)
-
-	// Address is required
-	if cfg.Address != "" {
-		req.Header.Set("POLY_ADDRESS", cfg.Address)
-	}
-
-	// Send request
-	httpClient := &http.Client{Timeout: 30 * time.Second}
-	httpResp, err := httpClient.Do(req)
-	if err != nil {
-		err = fmt.Errorf("send request: %w", err)
-		return nil, err
-	}
-	defer httpResp.Body.Close()
-
-	// Read response body
-	body, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		err = fmt.Errorf("read response: %w", err)
-		return nil, err
-	}
-
-	// Log full request details for debugging
-	fmt.Printf("\nDebug - Batch Request Details:\n")
-	fmt.Printf("  URL: %s\n", clobURL)
-	fmt.Printf("  Method: POST\n")
-	fmt.Printf("  API Key: %s\n", cfg.APIKey)
-	fmt.Printf("  Address: %s\n", cfg.Address)
-	fmt.Printf("  Timestamp: %s\n", timestamp)
-	fmt.Printf("  Signature: %s\n", signature)
-	fmt.Printf("  Request Body: %s\n", string(orderJSON))
-
-	// Check status code
-	fmt.Printf("\nDebug - Batch Response:\n")
-	fmt.Printf("  Status Code: %d\n", httpResp.StatusCode)
-	fmt.Printf("  Response Body: %s\n\n", string(body))
-
-	if httpResp.StatusCode != http.StatusOK && httpResp.StatusCode != http.StatusCreated {
-		// Try to parse error response
-		var errResp ErrorResponse
-		if json.Unmarshal(body, &errResp) == nil {
-			err = fmt.Errorf("API error (status %d): %s - %s", httpResp.StatusCode, errResp.Error, errResp.Message)
-			return nil, err
-		}
-		err = fmt.Errorf("API error (status %d): %s", httpResp.StatusCode, string(body))
-		return nil, err
-	}
-
-	// Parse batch success response (array of responses)
-	err = json.Unmarshal(body, &responses)
-	if err != nil {
-		err = fmt.Errorf("parse batch response: %w\nBody: %s", err, string(body))
-		return nil, err
-	}
-
-	return responses, nil
+	// Create and return OrderClient
+	return execution.NewOrderClient(orderClientCfg)
 }
+
 
 func loadConfig() (*Config, error) {
 	cfg := &Config{}
@@ -563,12 +376,6 @@ func getEnv(keys ...string) string {
 	return ""
 }
 
-func createHMACSignature(message string, secret []byte) string {
-	h := hmac.New(sha256.New, secret)
-	h.Write([]byte(message))
-	return base64.StdEncoding.EncodeToString(h.Sum(nil))
-}
-
 func displayOrderResponse(outcome string, resp *types.OrderSubmissionResponse, isPaper bool) {
 	if isPaper {
 		fmt.Printf("%s Order (Paper)\n", outcome)
@@ -590,12 +397,6 @@ func displayOrderResponse(outcome string, resp *types.OrderSubmissionResponse, i
 		fmt.Printf("  Error Message: %s\n", resp.ErrorMsg)
 	}
 	fmt.Println()
-}
-
-func mustParseFloat(s string) float64 {
-	var f float64
-	fmt.Sscanf(s, "%f", &f)
-	return f
 }
 
 func loadMockResponse(filename string) (resp *types.OrderSubmissionResponse, err error) {
