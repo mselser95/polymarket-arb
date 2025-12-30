@@ -181,6 +181,16 @@ func (m *Manager) Subscribe(ctx context.Context, tokenIDs []string) error {
 	totalSubscribed := len(m.subscribed)
 	m.mu.Unlock()
 
+	// Check if connection exists before attempting network I/O
+	if m.conn == nil {
+		// Keep subscription tracked but don't attempt network I/O
+		// This allows subscription state to be maintained across reconnects
+		SubscriptionCount.Set(float64(totalSubscribed))
+		m.logger.Debug("subscribe-no-connection-tracked-for-later",
+			zap.Int("token-count", len(newTokens)))
+		return fmt.Errorf("no active connection (tokens tracked for later)")
+	}
+
 	// Network I/O WITHOUT holding the lock
 	err := m.conn.WriteJSON(subscribeMsg)
 	if err != nil {
@@ -236,6 +246,15 @@ func (m *Manager) Unsubscribe(ctx context.Context, tokenIDs []string) (err error
 
 	totalSubscribed := len(m.subscribed)
 	m.mu.Unlock()
+
+	// Check if connection exists before attempting network I/O
+	if m.conn == nil {
+		// Keep unsubscription tracked but don't attempt network I/O
+		SubscriptionCount.Set(float64(totalSubscribed))
+		m.logger.Debug("unsubscribe-no-connection-state-updated",
+			zap.Int("token-count", len(tokensToUnsubscribe)))
+		return fmt.Errorf("no active connection (tokens untracked)")
+	}
 
 	// Send unsubscribe message (without holding lock)
 	err = m.conn.WriteJSON(unsubscribeMsg)
@@ -319,6 +338,15 @@ func (m *Manager) readLoop() {
 				// Send to channel (non-blocking)
 				select {
 				case m.messageChan <- obMsg:
+					// Warn if channel is near capacity (90%)
+					buffered := len(m.messageChan)
+					capacity := cap(m.messageChan)
+					if buffered > capacity*9/10 {
+						m.logger.Warn("websocket-message-channel-near-full",
+							zap.Int("buffered", buffered),
+							zap.Int("capacity", capacity),
+							zap.Float64("utilization", float64(buffered)/float64(capacity)*100))
+					}
 				default:
 					m.logger.Error("CRITICAL-message-channel-full-DROPPING-DATA",
 						zap.String("event-type", obMsg.EventType),
@@ -345,6 +373,15 @@ func (m *Manager) readLoop() {
 			// Send to channel (non-blocking)
 			select {
 			case m.messageChan <- &singleObMsg:
+				// Warn if channel is near capacity (90%)
+				buffered := len(m.messageChan)
+				capacity := cap(m.messageChan)
+				if buffered > capacity*9/10 {
+					m.logger.Warn("websocket-message-channel-near-full",
+						zap.Int("buffered", buffered),
+						zap.Int("capacity", capacity),
+						zap.Float64("utilization", float64(buffered)/float64(capacity)*100))
+				}
 			default:
 				m.logger.Error("CRITICAL-message-channel-full-DROPPING-DATA",
 					zap.String("event-type", singleObMsg.EventType),
@@ -391,6 +428,15 @@ func (m *Manager) readLoop() {
 				// Send to channel (non-blocking)
 				select {
 				case m.messageChan <- obMsg:
+					// Warn if channel is near capacity (90%)
+					buffered := len(m.messageChan)
+					capacity := cap(m.messageChan)
+					if buffered > capacity*9/10 {
+						m.logger.Warn("websocket-message-channel-near-full",
+							zap.Int("buffered", buffered),
+							zap.Int("capacity", capacity),
+							zap.Float64("utilization", float64(buffered)/float64(capacity)*100))
+					}
 				default:
 					m.logger.Error("CRITICAL-message-channel-full-DROPPING-DATA",
 						zap.String("event-type", "price_change"),
@@ -589,6 +635,10 @@ func (m *Manager) resubscribeAll(ctx context.Context) error {
 	}
 
 	m.mu.RLock()
+	if m.conn == nil {
+		m.mu.RUnlock()
+		return fmt.Errorf("no active connection for resubscribe")
+	}
 	err := m.conn.WriteJSON(subscribeMsg)
 	m.mu.RUnlock()
 

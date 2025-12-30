@@ -1,0 +1,9 @@
+{
+  "success": true,
+  "errorMsg": "invalid amount for a marketable BUY order ($0.765), min size: $1",
+  "orderId": "",
+  "orderHashes": null,
+  "status": "",
+  "takingAmount": "",
+  "makingAmount": ""
+}

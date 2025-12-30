@@ -23,7 +23,7 @@ type Executor struct {
 	wg               sync.WaitGroup
 	cumulativeProfit float64
 	mu               sync.Mutex
-	orderClient      *OrderClient // For live trading
+	orderClient      OrderPlacer // For live trading (interface)
 	circuitBreaker   *circuitbreaker.BalanceCircuitBreaker
 
 	// Fill verification config
@@ -41,7 +41,7 @@ type Config struct {
 	MaxPositionSize    float64
 	Logger             *zap.Logger
 	OpportunityChannel <-chan *arbitrage.Opportunity
-	OrderClient        *OrderClient                          // Optional: for live trading
+	OrderClient        OrderPlacer                           // Optional: for live trading (interface)
 	CircuitBreaker     *circuitbreaker.BalanceCircuitBreaker // Optional: for balance monitoring
 
 	// Fill verification config
@@ -323,7 +323,7 @@ func (e *Executor) executeLive(opp *arbitrage.Opportunity) *types.ExecutionResul
 		}, outcomeLogFields...)...)
 
 	// Build outcome parameters for order client with aggressive pricing
-	outcomeParams := make([]OutcomeOrderParams, len(opp.Outcomes))
+	outcomeParams := make([]types.OutcomeOrderParams, len(opp.Outcomes))
 	adjustedPrices := make([]float64, len(opp.Outcomes))
 
 	for i, outcome := range opp.Outcomes {
@@ -331,7 +331,7 @@ func (e *Executor) executeLive(opp *arbitrage.Opportunity) *types.ExecutionResul
 		adjustedPrice := adjustPriceForAggression(outcome.AskPrice, outcome.TickSize, e.aggressionTicks)
 		adjustedPrices[i] = adjustedPrice
 
-		outcomeParams[i] = OutcomeOrderParams{
+		outcomeParams[i] = types.OutcomeOrderParams{
 			TokenID:  outcome.TokenID,
 			Price:    adjustedPrice, // Use adjusted price, not raw ask
 			TickSize: outcome.TickSize,
@@ -339,22 +339,63 @@ func (e *Executor) executeLive(opp *arbitrage.Opportunity) *types.ExecutionResul
 		}
 	}
 
-	e.logger.Info("using-aggressive-pricing",
+	// Log aggressive pricing adjustment for monitoring
+	// Profit calculation is based on orderbook prices, not adjusted prices
+	// Aggressive pricing is to ensure fast fills, expecting to get filled near orderbook prices
+	originalAskSum := 0.0
+	for _, o := range opp.Outcomes {
+		originalAskSum += o.AskPrice
+	}
+
+	adjustedAskSum := 0.0
+	for _, p := range adjustedPrices {
+		adjustedAskSum += p
+	}
+
+	e.logger.Info("aggressive-pricing-applied",
+		zap.String("opportunity-id", opp.ID),
+		zap.String("market-slug", opp.MarketSlug),
 		zap.Int("aggression-ticks", e.aggressionTicks),
-		zap.Float64("original-ask-sum", func() float64 {
-			sum := 0.0
-			for _, o := range opp.Outcomes {
-				sum += o.AskPrice
-			}
-			return sum
-		}()),
-		zap.Float64("adjusted-ask-sum", func() float64 {
-			sum := 0.0
-			for _, p := range adjustedPrices {
-				sum += p
-			}
-			return sum
-		}()))
+		zap.Float64("original-ask-sum", originalAskSum),
+		zap.Float64("adjusted-ask-sum", adjustedAskSum),
+		zap.Float64("adjustment", adjustedAskSum-originalAskSum))
+
+	// Convert USD budget to token count per outcome
+	// OrderClient expects token count, but opp.MaxTradeSize is in USD
+	// Calculate how many tokens we can afford at each outcome's price
+	tokensPerOutcome := opp.MaxTradeSize / adjustedPrices[0]
+
+	// Use the lowest affordable token count across all outcomes to ensure budget compliance
+	for _, price := range adjustedPrices {
+		maxAffordable := opp.MaxTradeSize / price
+		if maxAffordable < tokensPerOutcome {
+			tokensPerOutcome = maxAffordable
+		}
+	}
+
+	// Log token calculation for verification
+	e.logger.Info("calculated-token-count",
+		zap.String("opportunity-id", opp.ID),
+		zap.Float64("usd-budget", opp.MaxTradeSize),
+		zap.Float64("tokens-per-outcome", tokensPerOutcome))
+
+	// Calculate and log estimated total USD cost for validation
+	estimatedCost := 0.0
+	for i, price := range adjustedPrices {
+		cost := tokensPerOutcome * price
+		estimatedCost += cost
+		e.logger.Debug("outcome-cost-estimate",
+			zap.Int("outcome-index", i),
+			zap.Float64("price", price),
+			zap.Float64("tokens", tokensPerOutcome),
+			zap.Float64("cost-usd", cost))
+	}
+
+	e.logger.Info("total-cost-estimate",
+		zap.String("opportunity-id", opp.ID),
+		zap.Float64("estimated-total-usd", estimatedCost),
+		zap.Float64("max-budget-usd", opp.MaxTradeSize),
+		zap.Bool("within-budget", estimatedCost <= opp.MaxTradeSize))
 
 	// Place orders using batch endpoint for atomic submission
 	ctx, cancel := context.WithTimeout(e.ctx, 30*time.Second)
@@ -363,7 +404,7 @@ func (e *Executor) executeLive(opp *arbitrage.Opportunity) *types.ExecutionResul
 	responses, err := e.orderClient.PlaceOrdersMultiOutcome(
 		ctx,
 		outcomeParams,
-		opp.MaxTradeSize,
+		tokensPerOutcome, // Pass token count, not USD amount
 	)
 
 	if err != nil {
@@ -476,9 +517,17 @@ func (e *Executor) verifyFillsAndUpdateMetrics(
 	ctx, cancel := context.WithTimeout(context.Background(), e.fillTimeout+10*time.Second)
 	defer cancel()
 
-	// Create fill tracker
+	// Create fill tracker (requires concrete OrderClient for GetOrder method)
+	// If orderClient is not a concrete *OrderClient (e.g., mock), skip fill verification
+	concreteClient, ok := e.orderClient.(*OrderClient)
+	if !ok {
+		e.logger.Warn("skipping-fill-verification-not-concrete-client",
+			zap.String("opportunity-id", opp.ID))
+		return
+	}
+
 	fillTracker := NewFillTracker(
-		e.orderClient,
+		concreteClient,
 		e.logger,
 		&FillTrackerConfig{
 			InitialBackoff: e.fillRetryInitial,

@@ -25,6 +25,19 @@ import (
 	"github.com/mselser95/polymarket-arb/pkg/types"
 )
 
+// OrderPlacer defines the interface for placing orders on the CLOB.
+// CRITICAL: tokenCount must be the SAME for all outcomes in arbitrage trades.
+// This ensures we own complete "sets" - exactly one outcome wins and pays $1.00 per token.
+type OrderPlacer interface {
+	// PlaceOrdersMultiOutcome places orders for multiple outcomes with the same token count.
+	// The tokenCount parameter applies to ALL outcomes (arbitrage requirement).
+	PlaceOrdersMultiOutcome(
+		ctx context.Context,
+		outcomes []types.OutcomeOrderParams,
+		tokenCount float64, // SAME count for ALL outcomes
+	) ([]*types.OrderSubmissionResponse, error)
+}
+
 // OrderClient handles order submission to Polymarket CLOB
 type OrderClient struct {
 	apiKey        string
@@ -37,6 +50,9 @@ type OrderClient struct {
 	orderBuilder  builder.ExchangeOrderBuilder
 	logger        *zap.Logger
 }
+
+// Compile-time check that OrderClient implements OrderPlacer
+var _ OrderPlacer = (*OrderClient)(nil)
 
 // OrderClientConfig holds configuration for the order client
 type OrderClientConfig struct {
@@ -317,21 +333,13 @@ func (c *OrderClient) PlaceOrdersBatch(
 	return yesResp, noResp, nil
 }
 
-// OutcomeOrderParams holds parameters for a single outcome order
-type OutcomeOrderParams struct {
-	TokenID  string
-	Price    float64
-	TickSize float64
-	MinSize  float64
-}
-
 // PlaceOrdersMultiOutcome places orders for N outcomes atomically using the batch endpoint.
 // This method supports binary (2 outcomes) and multi-outcome (3+) markets.
 // All orders are submitted in a single API call for atomic execution.
 // The size parameter specifies the number of tokens to buy for each outcome (not USD amount).
 func (c *OrderClient) PlaceOrdersMultiOutcome(
 	ctx context.Context,
-	outcomes []OutcomeOrderParams,
+	outcomes []types.OutcomeOrderParams,
 	size float64,
 ) (responses []*types.OrderSubmissionResponse, err error) {
 	if len(outcomes) < 2 {
