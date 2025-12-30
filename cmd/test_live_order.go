@@ -215,7 +215,7 @@ func runTestLiveOrder(cmd *cobra.Command, args []string) error {
 			noMinSize = noToken.MinOrderSize
 		}
 
-		orderParams := []execution.OutcomeOrderParams{
+		orderParams := []types.OutcomeOrderParams{
 			{
 				TokenID:  yesToken.TokenID,
 				Price:    yesPrice,

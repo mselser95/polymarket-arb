@@ -67,3 +67,12 @@ type OrderQueryResponse struct {
 	Message      string  `json:"message,omitempty"`        // Optional message
 	Error        string  `json:"error,omitempty"`          // Optional error
 }
+
+// OutcomeOrderParams holds parameters for a single outcome order.
+// Used by OrderPlacer interface for multi-outcome arbitrage trades.
+type OutcomeOrderParams struct {
+	TokenID  string
+	Price    float64
+	TickSize float64
+	MinSize  float64
+}

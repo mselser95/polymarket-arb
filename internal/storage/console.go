@@ -43,7 +43,7 @@ func (c *ConsoleStorage) StoreOpportunity(ctx context.Context, opp *arbitrage.Op
 
 	// Print summary
 	fmt.Printf("  ───────────────────────────────\n")
-	fmt.Printf("  Total Cost:     %.4f < %.4f (threshold)\n", opp.TotalPriceSum, opp.ConfigThreshold)
+	fmt.Printf("  Total Cost:     %.4f < %.4f (threshold)\n", opp.TotalPriceSum, opp.ConfigMaxPriceSum)
 	fmt.Printf("  Spread:         %.4f (%.2f bps)\n", 1.0-opp.TotalPriceSum, opp.ProfitMargin*10000)
 
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")

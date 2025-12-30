@@ -99,7 +99,7 @@ func (p *PostgresStorage) StoreOpportunity(ctx context.Context, opp *arbitrage.O
 		opp.TotalFees,
 		opp.NetProfit,
 		opp.NetProfitBPS,
-		opp.ConfigThreshold,
+		opp.ConfigMaxPriceSum,
 	)
 
 	if err != nil {

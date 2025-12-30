@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/mselser95/polymarket-arb/internal/arbitrage"
-	"github.com/mselser95/polymarket-arb/internal/testutil"
 	"go.uber.org/zap"
 )
 
@@ -52,7 +51,7 @@ func TestExecutor_ExecutePaper(t *testing.T) {
 		logger: logger,
 	}
 
-	opp := testutil.CreateTestOpportunity("test-market", "test-slug")
+	opp := arbitrage.CreateTestOpportunity("test-market", "test-slug")
 
 	result := exec.executePaper(opp)
 
@@ -117,7 +116,7 @@ func TestExecutor_ExecuteLive(t *testing.T) {
 		logger: logger,
 	}
 
-	opp := testutil.CreateTestOpportunity("test-market", "test-slug")
+	opp := arbitrage.CreateTestOpportunity("test-market", "test-slug")
 
 	result := exec.executeLive(opp)
 
@@ -143,7 +142,7 @@ func TestExecutor_Execute_UnknownMode(t *testing.T) {
 		logger: logger,
 	}
 
-	opp := testutil.CreateTestOpportunity("test-market", "test-slug")
+	opp := arbitrage.CreateTestOpportunity("test-market", "test-slug")
 
 	result := exec.execute(opp)
 
@@ -178,7 +177,7 @@ func TestExecutor_ExecutionLoop(t *testing.T) {
 	go exec.executionLoop()
 
 	// Send an opportunity
-	opp := testutil.CreateTestOpportunity("test-market", "test-slug")
+	opp := arbitrage.CreateTestOpportunity("test-market", "test-slug")
 	oppChan <- opp
 
 	// Give it time to process
@@ -220,7 +219,7 @@ func TestExecutor_ConcurrentExecution(t *testing.T) {
 	// Send multiple opportunities
 	numOpps := 10
 	for i := 0; i < numOpps; i++ {
-		opp := testutil.CreateTestOpportunity("test-market", "test-slug")
+		opp := arbitrage.CreateTestOpportunity("test-market", "test-slug")
 		oppChan <- opp
 	}
 

@@ -74,7 +74,7 @@ func TestDetectMultiOutcome_3Outcome(t *testing.T) {
 			logger, _ := zap.NewDevelopment()
 			detector := &Detector{
 				config: Config{
-					Threshold:    tt.threshold,
+					MaxPriceSum:    tt.threshold,
 					MinTradeSize: tt.minTradeSize,
 					MaxTradeSize: tt.maxTradeSize,
 					TakerFee:     takerFee,
@@ -154,7 +154,7 @@ func TestDetectMultiOutcome_InvalidPrices(t *testing.T) {
 			logger, _ := zap.NewDevelopment()
 			detector := &Detector{
 				config: Config{
-					Threshold:    0.995,
+					MaxPriceSum:    0.995,
 					MinTradeSize: 1.0,
 					TakerFee:     0.01,
 				},
@@ -201,7 +201,7 @@ func TestDetectMultiOutcome_InvalidSizes(t *testing.T) {
 			logger, _ := zap.NewDevelopment()
 			detector := &Detector{
 				config: Config{
-					Threshold:    0.995,
+					MaxPriceSum:    0.995,
 					MinTradeSize: 1.0,
 					TakerFee:     0.01,
 				},
@@ -223,7 +223,7 @@ func TestDetectMultiOutcome_MissingOrderbook(t *testing.T) {
 	logger, _ := zap.NewDevelopment()
 	detector := &Detector{
 		config: Config{
-			Threshold:    0.995,
+			MaxPriceSum:    0.995,
 			MinTradeSize: 1.0,
 			TakerFee:     0.01,
 		},
@@ -298,7 +298,7 @@ func TestDetectMultiOutcome_SizeConstraints(t *testing.T) {
 			logger, _ := zap.NewDevelopment()
 			detector := &Detector{
 				config: Config{
-					Threshold:    0.995,
+					MaxPriceSum:    0.995,
 					MinTradeSize: tt.minTradeSize,
 					MaxTradeSize: tt.maxTradeSize,
 					TakerFee:     0.01,
@@ -353,7 +353,7 @@ func TestDetectMultiOutcome_FeesEliminateProfit(t *testing.T) {
 			logger, _ := zap.NewDevelopment()
 			detector := &Detector{
 				config: Config{
-					Threshold:    0.995,
+					MaxPriceSum:    0.995,
 					MinTradeSize: 1.0,
 					MaxTradeSize: 1000.0,
 					TakerFee:     tt.takerFee,
@@ -425,7 +425,7 @@ func TestDetectMultiOutcome_LargeMarkets(t *testing.T) {
 			logger, _ := zap.NewDevelopment()
 			detector := &Detector{
 				config: Config{
-					Threshold:    0.995,
+					MaxPriceSum:    0.995,
 					MinTradeSize: 1.0,
 					MaxTradeSize: 1000.0,
 					TakerFee:     0.01,
@@ -485,7 +485,7 @@ func TestDetectMultiOutcome_BinaryCompatibility(t *testing.T) {
 	logger, _ := zap.NewDevelopment()
 	detector := &Detector{
 		config: Config{
-			Threshold:    0.995,
+			MaxPriceSum:    0.995,
 			MinTradeSize: 1.0,
 			MaxTradeSize: 1000.0,
 			TakerFee:     0.01,

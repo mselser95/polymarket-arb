@@ -34,7 +34,7 @@ type Opportunity struct {
 	TotalFees       float64 // Total taker fees for all outcomes
 	NetProfit       float64 // Net profit after fees
 	NetProfitBPS    int     // Net profit in basis points
-	ConfigThreshold float64 // Configured threshold for detection
+	ConfigMaxPriceSum float64 // Configured threshold for detection
 }
 
 // NewOpportunity creates a new arbitrage opportunity with fee accounting.
@@ -128,7 +128,7 @@ func NewMultiOutcomeOpportunity(
 		TotalFees:       totalFees,
 		NetProfit:       netProfit,
 		NetProfitBPS:    netProfitBPS,
-		ConfigThreshold: threshold,
+		ConfigMaxPriceSum: threshold,
 	}
 }
 

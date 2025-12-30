@@ -121,7 +121,7 @@ func (m *Manager) handleBookMessage(msg *types.OrderbookMessage) error {
 		BestBidSize:  bestBidSize,
 		BestAskPrice: bestAskPrice,
 		BestAskSize:  bestAskSize,
-		LastUpdated:  time.Now(),
+		LastUpdated:  time.UnixMilli(msg.Timestamp), // Use server timestamp for accurate latency tracking
 	}
 
 	// Track lock contention
@@ -141,6 +141,15 @@ func (m *Manager) handleBookMessage(msg *types.OrderbookMessage) error {
 	// Notify subscribers of update (non-blocking)
 	select {
 	case m.updateChan <- snapshot:
+		// Warn if channel is near capacity (90%)
+		buffered := len(m.updateChan)
+		capacity := cap(m.updateChan)
+		if buffered > capacity*9/10 {
+			m.logger.Warn("orderbook-update-channel-near-full",
+				zap.Int("buffered", buffered),
+				zap.Int("capacity", capacity),
+				zap.Float64("utilization", float64(buffered)/float64(capacity)*100))
+		}
 	default:
 		// Channel full, drop update
 		m.logger.Error("CRITICAL-orderbook-update-channel-full-DROPPING-DATA",
@@ -208,7 +217,7 @@ func (m *Manager) handlePriceChangeMessage(msg *types.OrderbookMessage) error {
 		}
 	}
 
-	snapshot.LastUpdated = time.Now()
+	snapshot.LastUpdated = time.UnixMilli(msg.Timestamp) // Use server timestamp for accurate latency tracking
 
 	// Unlock before logging and channel sends
 	m.mu.Unlock()
@@ -222,6 +231,15 @@ func (m *Manager) handlePriceChangeMessage(msg *types.OrderbookMessage) error {
 	snapshotCopy := *snapshot
 	select {
 	case m.updateChan <- &snapshotCopy:
+		// Warn if channel is near capacity (90%)
+		buffered := len(m.updateChan)
+		capacity := cap(m.updateChan)
+		if buffered > capacity*9/10 {
+			m.logger.Warn("orderbook-update-channel-near-full",
+				zap.Int("buffered", buffered),
+				zap.Int("capacity", capacity),
+				zap.Float64("utilization", float64(buffered)/float64(capacity)*100))
+		}
 	default:
 		// Channel full, drop update
 		m.logger.Error("CRITICAL-orderbook-update-channel-full-DROPPING-DATA",

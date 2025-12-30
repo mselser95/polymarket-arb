@@ -131,7 +131,7 @@ func TestDetect(t *testing.T) {
 			logger, _ := zap.NewDevelopment()
 			detector := &Detector{
 				config: Config{
-					Threshold:    tt.threshold,
+					MaxPriceSum:    tt.threshold,
 					MinTradeSize: tt.minTradeSize,
 					MaxTradeSize: tt.maxTradeSize,
 					TakerFee:     takerFee,
@@ -177,7 +177,7 @@ func TestDetectInvalidOrderbooks(t *testing.T) {
 	logger, _ := zap.NewDevelopment()
 	detector := &Detector{
 		config: Config{
-			Threshold:    0.995,
+			MaxPriceSum:    0.995,
 			MinTradeSize: 10.0,
 			TakerFee:     0.01,
 		},

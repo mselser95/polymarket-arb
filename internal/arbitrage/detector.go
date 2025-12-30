@@ -35,7 +35,7 @@ type Detector struct {
 
 // Config holds detector configuration.
 type Config struct {
-	Threshold    float64
+	MaxPriceSum  float64 // Maximum acceptable YES + NO price sum (lower = stricter)
 	MinTradeSize float64
 	MaxTradeSize float64
 	TakerFee     float64
@@ -60,7 +60,7 @@ func New(cfg Config, obManager *orderbook.Manager, discoveryService *discovery.S
 func (d *Detector) Start(ctx context.Context) error {
 	d.ctx = ctx
 	d.logger.Info("arbitrage-detector-starting",
-		zap.Float64("threshold", d.config.Threshold),
+		zap.Float64("threshold", d.config.MaxPriceSum),
 		zap.Float64("min-trade-size", d.config.MinTradeSize),
 		zap.Float64("max-trade-size", d.config.MaxTradeSize))
 
@@ -251,12 +251,12 @@ func (d *Detector) detectMultiOutcome(
 	}
 
 	// Check if arbitrage exists
-	if priceSum >= d.config.Threshold {
+	if priceSum >= d.config.MaxPriceSum {
 		d.logger.Debug("price-above-threshold",
 			zap.String("market-slug", market.MarketSlug),
 			zap.Float64("price-sum", priceSum),
-			zap.Float64("threshold", d.config.Threshold),
-			zap.Float64("shortfall", priceSum-d.config.Threshold))
+			zap.Float64("threshold", d.config.MaxPriceSum),
+			zap.Float64("shortfall", priceSum-d.config.MaxPriceSum))
 		OpportunitiesRejectedTotal.WithLabelValues("price_above_threshold").Inc()
 		return nil, false
 	}
@@ -286,7 +286,7 @@ func (d *Detector) detectMultiOutcome(
 		d.logger.Info("opportunity-rejected-below-min-size",
 			zap.String("market-slug", market.MarketSlug),
 			zap.Float64("price-sum", priceSum),
-			zap.Float64("spread", d.config.Threshold-priceSum),
+			zap.Float64("spread", d.config.MaxPriceSum-priceSum),
 			zap.Float64("calculated-size", maxSize),
 			zap.Float64("min-size", d.config.MinTradeSize))
 		OpportunitiesRejectedTotal.WithLabelValues("below_min_size").Inc()
@@ -330,7 +330,7 @@ func (d *Detector) detectMultiOutcome(
 				zap.String("market-slug", market.MarketSlug),
 				zap.String("outcome", market.Outcomes[i].Outcome),
 				zap.Float64("price-sum", priceSum),
-				zap.Float64("spread", d.config.Threshold-priceSum),
+				zap.Float64("spread", d.config.MaxPriceSum-priceSum),
 				zap.Float64("token-size", tokenSize),
 				zap.Float64("market-min-size", minSize),
 				zap.Float64("required-usd", minSize*book.BestAskPrice))
@@ -367,7 +367,7 @@ func (d *Detector) detectMultiOutcome(
 		market.Question,
 		outcomes,
 		maxSize, // Pass calculated maxSize (includes all constraints)
-		d.config.Threshold,
+		d.config.MaxPriceSum,
 		d.config.TakerFee,
 	)
 
@@ -376,7 +376,7 @@ func (d *Detector) detectMultiOutcome(
 		d.logger.Info("opportunity-rejected-negative-profit-after-fees",
 			zap.String("market-slug", market.MarketSlug),
 			zap.Float64("price-sum", opp.TotalPriceSum),
-			zap.Float64("spread", d.config.Threshold-opp.TotalPriceSum),
+			zap.Float64("spread", d.config.MaxPriceSum-opp.TotalPriceSum),
 			zap.Float64("trade-size", opp.MaxTradeSize),
 			zap.Float64("gross-profit", opp.EstimatedProfit),
 			zap.Float64("total-fees", opp.TotalFees),
@@ -431,12 +431,12 @@ func (d *Detector) printArbitrageAnalysis(
 	fmt.Println()
 
 	// Calculate spread and potential profit
-	spread := d.config.Threshold - priceSum
+	spread := d.config.MaxPriceSum - priceSum
 	spreadBPS := spread * 10000
 
 	fmt.Println("  PRICE ANALYSIS:")
 	fmt.Printf("    Sum of Ask Prices:  %.6f\n", priceSum)
-	fmt.Printf("    Threshold:          %.6f\n", d.config.Threshold)
+	fmt.Printf("    Threshold:          %.6f\n", d.config.MaxPriceSum)
 	fmt.Printf("    Spread:             %.6f (%.0f bps)\n", spread, spreadBPS)
 	fmt.Println()
 
@@ -518,7 +518,7 @@ func (d *Detector) printArbitrageAnalysis(
 	// Print validation status
 	fmt.Println("  VALIDATION:")
 	fmt.Printf("    Price Check:        %s (sum < threshold)\n",
-		map[bool]string{true: "✓ PASS", false: "✗ FAIL"}[priceSum < d.config.Threshold])
+		map[bool]string{true: "✓ PASS", false: "✗ FAIL"}[priceSum < d.config.MaxPriceSum])
 	fmt.Printf("    Size Check:         %s (size >= min)\n",
 		map[bool]string{true: "✓ PASS", false: "✗ FAIL"}[cappedSize >= d.config.MinTradeSize])
 	fmt.Printf("    Profit Check:       %s (net profit > 0)\n",

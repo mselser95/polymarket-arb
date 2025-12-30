@@ -407,7 +407,7 @@ pkg/
 All config loaded via environment variables with defaults. See `LoadFromEnv()` for full list.
 
 **Critical Settings:**
-- `ARB_THRESHOLD=0.995`: Detect when YES + NO < threshold (accounting for fees)
+- `ARB_MAX_PRICE_SUM=0.995`: Detect when YES + NO < threshold (accounting for fees)
 - `ARB_MIN_TRADE_SIZE=1.0`: Minimum $1 trade (must meet per-market minimums)
 - `ARB_MAX_TRADE_SIZE=2.0`: Maximum $2 trade (caps calculated size from orderbook)
 - `ARB_TAKER_FEE=0.01`: Polymarket charges 1% taker fee
@@ -695,15 +695,15 @@ go run . run
 ```bash
 # .env.dryrun
 EXECUTION_MODE=dry-run
-ARB_THRESHOLD=0.98
+ARB_MAX_PRICE_SUM=0.98
 
 # .env.paper
 EXECUTION_MODE=paper
-ARB_THRESHOLD=0.995
+ARB_MAX_PRICE_SUM=0.995
 
 # .env.live
 EXECUTION_MODE=live
-ARB_THRESHOLD=0.995
+ARB_MAX_PRICE_SUM=0.995
 ARB_MAX_TRADE_SIZE=10.0
 ```
 
@@ -712,7 +712,7 @@ ARB_MAX_TRADE_SIZE=10.0
 **Aggressive detection (dry-run):**
 ```bash
 EXECUTION_MODE=dry-run
-ARB_THRESHOLD=0.98          # 2% spread (more opportunities)
+ARB_MAX_PRICE_SUM=0.98          # 2% spread (more opportunities)
 ARB_MIN_TRADE_SIZE=1.0      # Low minimum
 ARB_MAX_TRADE_SIZE=100.0    # High cap (irrelevant for dry-run)
 LOG_LEVEL=info              # Clean output
@@ -721,7 +721,7 @@ LOG_LEVEL=info              # Clean output
 **Conservative testing (paper):**
 ```bash
 EXECUTION_MODE=paper
-ARB_THRESHOLD=0.995         # 0.5% spread (quality opportunities)
+ARB_MAX_PRICE_SUM=0.995         # 0.5% spread (quality opportunities)
 ARB_MIN_TRADE_SIZE=5.0
 ARB_MAX_TRADE_SIZE=20.0
 LOG_LEVEL=debug             # Detailed logging
@@ -730,7 +730,7 @@ LOG_LEVEL=debug             # Detailed logging
 **Production (live):**
 ```bash
 EXECUTION_MODE=live
-ARB_THRESHOLD=0.995
+ARB_MAX_PRICE_SUM=0.995
 ARB_MIN_TRADE_SIZE=10.0     # Above market minimums
 ARB_MAX_TRADE_SIZE=50.0     # Risk management
 LOG_LEVEL=info
@@ -850,7 +850,7 @@ case <-time.After(1 * time.Second):
 - **Trade-off:** More subscriptions = more opportunities but higher resource usage
 
 **Detector Not Finding Opportunities**
-- Check thresholds: `ARB_THRESHOLD=0.98` (2% spread) finds more opportunities
+- Check thresholds: `ARB_MAX_PRICE_SUM=0.98` (2% spread) finds more opportunities
 - Verify min/max trade sizes: `ARB_MIN_TRADE_SIZE <= ARB_MAX_TRADE_SIZE`
 - Use dry-run mode first: `EXECUTION_MODE=dry-run`
 - Enable debug logging: `LOG_LEVEL=debug`

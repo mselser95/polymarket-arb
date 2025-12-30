@@ -15,7 +15,7 @@ import (
 func (a *App) Run() error {
 	a.logger.Info("application-starting",
 		zap.String("mode", a.cfg.ExecutionMode),
-		zap.Float64("arb-threshold", a.cfg.ArbThreshold),
+		zap.Float64("arb-max-price-sum", a.cfg.ArbMaxPriceSum),
 		zap.String("log-level", a.cfg.LogLevel))
 
 	// Start all components

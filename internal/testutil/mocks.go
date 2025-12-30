@@ -9,7 +9,6 @@ import (
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/mselser95/polymarket-arb/internal/arbitrage"
 	"github.com/mselser95/polymarket-arb/pkg/types"
 	"github.com/mselser95/polymarket-arb/pkg/wallet"
 )
@@ -35,7 +34,7 @@ func NewMockGammaAPI(markets []*types.Market) *MockGammaAPI {
 		// Gamma API returns a direct array, not wrapped in an object
 		if r.URL.Path == "/markets" {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(mock.Markets)
+			_ = json.NewEncoder(w).Encode(mock.Markets) //nolint:errcheck // Test mock
 			return
 		}
 
@@ -45,7 +44,7 @@ func NewMockGammaAPI(markets []*types.Market) *MockGammaAPI {
 			for _, m := range mock.Markets {
 				if m.Slug == slug {
 					w.Header().Set("Content-Type", "application/json")
-					json.NewEncoder(w).Encode(m)
+					_ = json.NewEncoder(w).Encode(m) //nolint:errcheck // Test mock
 					return
 				}
 			}
@@ -69,25 +68,24 @@ func (m *MockGammaAPI) AddMarket(market *types.Market) {
 
 // MockStorage is an in-memory storage implementation for testing.
 type MockStorage struct {
-	Opportunities []*arbitrage.Opportunity
+	Opportunities []any
 	mu            sync.Mutex
 }
 
 // NewMockStorage creates a new mock storage.
 func NewMockStorage() *MockStorage {
 	return &MockStorage{
-		Opportunities: make([]*arbitrage.Opportunity, 0),
+		Opportunities: make([]any, 0),
 	}
 }
 
 // StoreOpportunity stores an opportunity in memory.
-func (m *MockStorage) StoreOpportunity(ctx context.Context, opp *arbitrage.Opportunity) error {
+func (m *MockStorage) StoreOpportunity(ctx context.Context, opp any) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Store a copy to avoid race conditions
-	oppCopy := *opp
-	m.Opportunities = append(m.Opportunities, &oppCopy)
+	// Store the opportunity (already a pointer typically)
+	m.Opportunities = append(m.Opportunities, opp)
 	return nil
 }
 
@@ -97,12 +95,12 @@ func (m *MockStorage) Close() error {
 }
 
 // GetOpportunities returns all stored opportunities.
-func (m *MockStorage) GetOpportunities() []*arbitrage.Opportunity {
+func (m *MockStorage) GetOpportunities() []any {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	// Return a copy to avoid race conditions
-	result := make([]*arbitrage.Opportunity, len(m.Opportunities))
+	result := make([]any, len(m.Opportunities))
 	copy(result, m.Opportunities)
 	return result
 }
@@ -111,7 +109,7 @@ func (m *MockStorage) GetOpportunities() []*arbitrage.Opportunity {
 func (m *MockStorage) Clear() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Opportunities = make([]*arbitrage.Opportunity, 0)
+	m.Opportunities = make([]any, 0)
 }
 
 // MockWebSocket simulates a WebSocket connection for testing.

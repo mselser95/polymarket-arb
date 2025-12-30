@@ -103,7 +103,7 @@ curl http://localhost:8080/metrics
 4. **Profit Margin Distribution (BPS)** - Heatmap
    - Distribution of profit margins in basis points
    - **Healthy**: Cluster around 30-100 bps
-   - **Warning**: If too low (<10 bps), increase `ARB_THRESHOLD`
+   - **Warning**: If too low (<10 bps), increase `ARB_MAX_PRICE_SUM`
 
 5. **Net Profit After Fees (BPS)** - Heatmap
    - Profit after 2% total taker fees
@@ -117,7 +117,7 @@ curl http://localhost:8080/metrics
 7. **Opportunities Rejected (by Reason)** - Pie chart
    - Breakdown: `min_size`, `max_size`, `low_profit`
    - **High `min_size` rejections**: Markets have high minimums (>$5)
-   - **High `low_profit` rejections**: Consider lowering `ARB_THRESHOLD`
+   - **High `low_profit` rejections**: Consider lowering `ARB_MAX_PRICE_SUM`
 
 8. **Trades Executed (by Outcome)** - Stat
    - Count by YES vs NO outcome
@@ -555,7 +555,7 @@ CIRCUIT_BREAKER_HYSTERESIS_RATIO=1.3       # 1.3x to re-enable
 
 **Question**: "Why are so many opportunities rejected?"
 - Check **Opportunities Rejected** bar chart
-- **High `low_profit`**: Markets tight, consider lowering `ARB_THRESHOLD`
+- **High `low_profit`**: Markets tight, consider lowering `ARB_MAX_PRICE_SUM`
 - **High `min_size`**: Markets have high minimums, increase `ARB_MIN_TRADE_SIZE`
 - **High `max_size`**: Hit position limits, increase `ARB_MAX_TRADE_SIZE`
 
@@ -777,7 +777,7 @@ MARKETS_CACHE_TTL=48h  # Default: 24h
    - Fix: Check network, restart bot
 
 3. **Threshold too strict**
-   - Check: `ARB_THRESHOLD` value
+   - Check: `ARB_MAX_PRICE_SUM` value
    - Fix: Lower to 0.98 (2% spread) temporarily to test
 
 4. **Orderbook empty**
@@ -887,7 +887,7 @@ CIRCUIT_BREAKER_TRADE_MULTIPLIER=5.0  # Increase from 3.0 to 5.0
 # Configuration
 DISCOVERY_MARKET_LIMIT=200           # Track 200 markets
 WS_POOL_SIZE=10                      # 10 WebSocket connections
-ARB_THRESHOLD=0.99                   # Relaxed threshold
+ARB_MAX_PRICE_SUM=0.99                   # Relaxed threshold
 ARB_MIN_TRADE_SIZE=1.0               # Low minimum
 
 # Trade-offs
@@ -904,7 +904,7 @@ ARB_MIN_TRADE_SIZE=1.0               # Low minimum
 # Configuration
 DISCOVERY_MARKET_LIMIT=20            # Only 20 high-volume markets
 WS_POOL_SIZE=5                       # Standard pool
-ARB_THRESHOLD=0.995                  # Strict threshold
+ARB_MAX_PRICE_SUM=0.995                  # Strict threshold
 LOG_LEVEL=warn                       # Minimal logging
 
 # Code optimizations
@@ -919,7 +919,7 @@ LOG_LEVEL=warn                       # Minimal logging
 
 ```bash
 # Configuration
-ARB_THRESHOLD=0.995                  # 0.5% spread minimum
+ARB_MAX_PRICE_SUM=0.995                  # 0.5% spread minimum
 ARB_MIN_TRADE_SIZE=10.0              # Meet market minimums
 ARB_MAX_TRADE_SIZE=100.0             # Large positions
 EXECUTION_MODE=live                  # Real trading
@@ -937,7 +937,7 @@ EXECUTION_MODE=live                  # Real trading
 ```bash
 # Configuration
 EXECUTION_MODE=paper                 # Simulated trading
-ARB_THRESHOLD=0.98                   # Aggressive (more opportunities)
+ARB_MAX_PRICE_SUM=0.98                   # Aggressive (more opportunities)
 ARB_MIN_TRADE_SIZE=1.0               # Low minimum
 STORAGE_MODE=postgres                # Persistent logging
 

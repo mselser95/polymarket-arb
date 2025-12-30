@@ -56,6 +56,16 @@ func (c *Client) FetchActiveMarkets(ctx context.Context, limit int, offset int, 
 
 // fetchSinglePage fetches a single page of markets without pagination.
 func (c *Client) fetchSinglePage(ctx context.Context, limit int, offset int, orderBy string) (*types.MarketsResponse, error) {
+	return c.fetchSinglePageWithFilter(ctx, limit, offset, orderBy, false)
+}
+
+// fetchSinglePageClosed fetches a single page of closed markets.
+func (c *Client) fetchSinglePageClosed(ctx context.Context, limit int, offset int, orderBy string) (*types.MarketsResponse, error) {
+	return c.fetchSinglePageWithFilter(ctx, limit, offset, orderBy, true)
+}
+
+// fetchSinglePageWithFilter fetches a single page of markets with configurable closed filter.
+func (c *Client) fetchSinglePageWithFilter(ctx context.Context, limit int, offset int, orderBy string, closed bool) (*types.MarketsResponse, error) {
 	if limit == 0 {
 		limit = MaxBatchSize
 	}
@@ -64,8 +74,8 @@ func (c *Client) fetchSinglePage(ctx context.Context, limit int, offset int, ord
 
 	// Build query parameters
 	params := url.Values{}
-	params.Add("closed", "false")
-	params.Add("active", "true")
+	params.Add("closed", strconv.FormatBool(closed))
+	params.Add("active", strconv.FormatBool(!closed))
 	params.Add("limit", strconv.Itoa(limit))
 	params.Add("offset", strconv.Itoa(offset))
 	params.Add("order", orderBy)
@@ -210,16 +220,39 @@ func (c *Client) fetchWithPagination(ctx context.Context, limit int, offset int,
 
 // FetchMarketBySlug fetches a single market by its slug.
 // Note: The Gamma API doesn't support /markets/{slug}, only /markets/{id}.
-// This function searches through the markets list to find the matching slug.
+// This function searches through both active and closed markets lists to find the matching slug.
 func (c *Client) FetchMarketBySlug(ctx context.Context, slug string) (*types.Market, error) {
-	// Fetch markets with large limit to search through
-	// We'll paginate if needed to find the market
+	// First, try active markets (most common case)
+	market, err := c.searchMarketsBySlug(ctx, slug, false)
+	if err == nil {
+		return market, nil
+	}
+
+	// Fallback: Search closed markets
+	market, err = c.searchMarketsBySlug(ctx, slug, true)
+	if err == nil {
+		return market, nil
+	}
+
+	return nil, fmt.Errorf("market not found in active or closed markets: %s", slug)
+}
+
+// searchMarketsBySlug searches for a market by slug in either active or closed markets.
+func (c *Client) searchMarketsBySlug(ctx context.Context, slug string, closed bool) (*types.Market, error) {
 	limit := 100
 	offset := 0
 	maxPages := 10 // Search up to 1000 markets
 
 	for range maxPages {
-		resp, err := c.FetchActiveMarkets(ctx, limit, offset, "volume24hr")
+		var resp *types.MarketsResponse
+		var err error
+
+		if closed {
+			resp, err = c.fetchSinglePageClosed(ctx, limit, offset, "volume24hr")
+		} else {
+			resp, err = c.FetchActiveMarkets(ctx, limit, offset, "volume24hr")
+		}
+
 		if err != nil {
 			return nil, fmt.Errorf("fetch markets: %w", err)
 		}

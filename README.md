@@ -413,7 +413,7 @@ WS_RECONNECT_BASE_DELAY=1s            # Initial reconnection delay
 WS_RECONNECT_MAX_DELAY=32s            # Max reconnection delay
 
 # Arbitrage Detection
-ARB_THRESHOLD=0.995                   # Detect when YES + NO < 0.995
+ARB_MAX_PRICE_SUM=0.995                   # Detect when YES + NO < 0.995
 ARB_MIN_TRADE_SIZE=1.0                # Minimum $1 USDC trade
 ARB_MAX_TRADE_SIZE=2.0                # Maximum $2 USDC trade (caps calculated size)
 ARB_TAKER_FEE=0.01                    # 1% taker fee (0.01 = 1%)
@@ -474,7 +474,7 @@ Example:
 go run . --threshold 0.98
 
 # Override via environment variable
-ARB_THRESHOLD=0.98 go run .
+ARB_MAX_PRICE_SUM=0.98 go run .
 ```
 
 ## CLI Commands
@@ -1338,7 +1338,7 @@ go tool pprof goroutine.prof
    ```bash
    # Current threshold: 0.995 (0.5% spread)
    # Try relaxing:
-   ARB_THRESHOLD=0.98 go run .  # 2% spread
+   ARB_MAX_PRICE_SUM=0.98 go run .  # 2% spread
    ```
 
 2. **Min/max trade size misconfigured**

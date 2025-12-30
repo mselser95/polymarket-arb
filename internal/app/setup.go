@@ -182,7 +182,7 @@ func setupArbitrageDetector(
 ) *arbitrage.Detector {
 	return arbitrage.New(
 		arbitrage.Config{
-			Threshold:    cfg.ArbThreshold,
+			MaxPriceSum:  cfg.ArbMaxPriceSum,
 			MinTradeSize: cfg.ArbMinTradeSize,
 			MaxTradeSize: cfg.ArbMaxTradeSize,
 			TakerFee:     cfg.ArbTakerFee,

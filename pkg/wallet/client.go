@@ -43,6 +43,8 @@ type Position struct {
 	ConditionID  string
 	Outcome      string
 	Size         float64
+	AvgPrice     float64 // Average entry price
+	CurrentPrice float64 // Current market price
 	Value        float64 // Current USD value
 	InitialValue float64 // Cost basis USD
 	CashPnL      float64 // USD P&L
@@ -225,6 +227,8 @@ func (c *Client) GetPositions(ctx context.Context, address string) (positions []
 				ConditionID:  pos.ConditionID,
 				Outcome:      pos.Outcome,
 				Size:         pos.Size,
+				AvgPrice:     pos.AvgPrice,
+				CurrentPrice: pos.CurPrice,
 				Value:        pos.CurrentValue,
 				InitialValue: pos.InitialValue,
 				CashPnL:      pos.CashPnL,

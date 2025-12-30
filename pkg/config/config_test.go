@@ -85,7 +85,7 @@ func TestConfig_NegativeValues(t *testing.T) {
 			HTTPPort:             "8080",
 			PolymarketWSURL:      "wss://ws-subscriptions-clob.polymarket.com/ws/market",
 			PolymarketGammaURL:   "https://gamma-api.polymarket.com",
-			ArbThreshold:         0.995,
+			ArbMaxPriceSum:         0.995,
 			ArbMinTradeSize:      1.0,
 			ArbMaxTradeSize:      10.0,
 			MaxMarketDuration:    1 * time.Hour,
@@ -112,7 +112,7 @@ func TestConfig_NegativeValues(t *testing.T) {
 			HTTPPort:             "8080",
 			PolymarketWSURL:      "wss://ws-subscriptions-clob.polymarket.com/ws/market",
 			PolymarketGammaURL:   "https://gamma-api.polymarket.com",
-			ArbThreshold:         0.995,
+			ArbMaxPriceSum:         0.995,
 			ArbMinTradeSize:      1.0,
 			ArbMaxTradeSize:      10.0,
 			MaxMarketDuration:    -1 * time.Hour, // Negative value
@@ -141,7 +141,7 @@ func TestConfig_PoolSizeValidation(t *testing.T) {
 			HTTPPort:             "8080",
 			PolymarketWSURL:      "wss://ws-subscriptions-clob.polymarket.com/ws/market",
 			PolymarketGammaURL:   "https://gamma-api.polymarket.com",
-			ArbThreshold:         0.995,
+			ArbMaxPriceSum:         0.995,
 			ArbMinTradeSize:      1.0,
 			ArbMaxTradeSize:      10.0,
 			MaxMarketDuration:    1 * time.Hour,
@@ -168,7 +168,7 @@ func TestConfig_PoolSizeValidation(t *testing.T) {
 			HTTPPort:             "8080",
 			PolymarketWSURL:      "wss://ws-subscriptions-clob.polymarket.com/ws/market",
 			PolymarketGammaURL:   "https://gamma-api.polymarket.com",
-			ArbThreshold:         0.995,
+			ArbMaxPriceSum:         0.995,
 			ArbMinTradeSize:      1.0,
 			ArbMaxTradeSize:      10.0,
 			MaxMarketDuration:    1 * time.Hour,
@@ -223,29 +223,29 @@ func TestConfig_PoolSizeValidation(t *testing.T) {
 		}
 	})
 
-	t.Run("pool_size_default_is_5", func(t *testing.T) {
+	t.Run("pool_size_default_is_20", func(t *testing.T) {
 		// Don't set WS_POOL_SIZE, check default
 		cfg, err := LoadFromEnv()
 		if err != nil {
 			t.Fatalf("expected no error, got %v", err)
 		}
 
-		if cfg.WSPoolSize != 5 {
-			t.Errorf("expected default WSPoolSize to be 5, got %d", cfg.WSPoolSize)
+		if cfg.WSPoolSize != 20 {
+			t.Errorf("expected default WSPoolSize to be 20, got %d", cfg.WSPoolSize)
 		}
 	})
 }
 
 func TestConfig_DefaultMarketLimit(t *testing.T) {
-	t.Run("default_market_limit_is_1000", func(t *testing.T) {
+	t.Run("default_market_limit_is_2500", func(t *testing.T) {
 		// Don't set DISCOVERY_MARKET_LIMIT, check default
 		cfg, err := LoadFromEnv()
 		if err != nil {
 			t.Fatalf("expected no error, got %v", err)
 		}
 
-		if cfg.DiscoveryMarketLimit != 1000 {
-			t.Errorf("expected default DiscoveryMarketLimit to be 1000, got %d", cfg.DiscoveryMarketLimit)
+		if cfg.DiscoveryMarketLimit != 2500 {
+			t.Errorf("expected default DiscoveryMarketLimit to be 2500, got %d", cfg.DiscoveryMarketLimit)
 		}
 	})
 }

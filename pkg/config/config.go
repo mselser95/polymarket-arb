@@ -40,7 +40,7 @@ type Config struct {
 	WSMessageBufferSize     int
 
 	// Arbitrage Detection
-	ArbThreshold         float64
+	ArbMaxPriceSum       float64 // Maximum acceptable YES + NO price sum (lower = stricter)
 	ArbMinTradeSize      float64
 	ArbMaxTradeSize      float64
 	ArbDetectionInterval time.Duration
@@ -91,7 +91,7 @@ func LoadFromEnv() (*Config, error) {
 
 		// Market Discovery defaults
 		DiscoveryPollInterval: getDurationOrDefault("DISCOVERY_POLL_INTERVAL", 30*time.Second),
-		DiscoveryMarketLimit:  getIntOrDefault("DISCOVERY_MARKET_LIMIT", 600),
+		DiscoveryMarketLimit:  getIntOrDefault("DISCOVERY_MARKET_LIMIT", 2500),
 		MaxMarketDuration:     getDurationOrDefault("ARB_MAX_MARKET_DURATION", 0), // 0 = unlimited
 
 		// Market Cleanup defaults
@@ -108,7 +108,7 @@ func LoadFromEnv() (*Config, error) {
 		WSMessageBufferSize:     getIntOrDefault("WS_MESSAGE_BUFFER_SIZE", 100000),
 
 		// Arbitrage defaults
-		ArbThreshold:         getFloat64OrDefault("ARB_THRESHOLD", 0.995),
+		ArbMaxPriceSum:       getFloat64OrDefault("ARB_MAX_PRICE_SUM", 0.995),
 		ArbMinTradeSize:      getFloat64OrDefault("ARB_MIN_TRADE_SIZE", 1.0),
 		ArbMaxTradeSize:      getFloat64OrDefault("ARB_MAX_TRADE_SIZE", 2.0),
 		ArbDetectionInterval: getDurationOrDefault("ARB_DETECTION_INTERVAL", 100*time.Millisecond),
@@ -165,8 +165,8 @@ func (c *Config) Validate() (err error) {
 		return errors.New("POLYMARKET_GAMMA_API_URL cannot be empty")
 	}
 
-	if c.ArbThreshold <= 0 || c.ArbThreshold > 1.10 {
-		return fmt.Errorf("ARB_THRESHOLD must be between 0 and 1.10 (values > 1.0 for research mode), got %f", c.ArbThreshold)
+	if c.ArbMaxPriceSum <= 0 || c.ArbMaxPriceSum > 1.10 {
+		return fmt.Errorf("ARB_MAX_PRICE_SUM must be between 0 and 1.10 (values > 1.0 for research mode), got %f", c.ArbMaxPriceSum)
 	}
 
 	if c.ExecutionMode != "paper" && c.ExecutionMode != "live" && c.ExecutionMode != "dry-run" {
